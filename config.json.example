@@ -1,0 +1,35 @@
+{
+  "accounts": [
+    {
+      "name": "Main Account",
+      "token": "YOUR_FLEX_TOKEN_HERE",
+      "query_id": "YOUR_QUERY_ID_HERE",
+      "enabled": true
+    },
+    {
+      "name": "IRA Account",
+      "token": "YOUR_FLEX_TOKEN_HERE_2",
+      "query_id": "YOUR_QUERY_ID_HERE_2",
+      "enabled": false
+    }
+  ],
+  "database": {
+    "path": "~/.ibkr-options-analyzer/data.db"
+  },
+  "http": {
+    "user_agent": "IBKROptionsAnalyzer/1.0 (personal tool)",
+    "timeout_seconds": 30,
+    "max_retries": 5,
+    "retry_delay_ms": 2000
+  },
+  "flex": {
+    "poll_interval_seconds": 5,
+    "max_poll_duration_seconds": 300
+  },
+  "logging": {
+    "level": "info",
+    "file": "~/.ibkr-options-analyzer/logs/app.log",
+    "max_file_size_mb": 10,
+    "max_files": 5
+  }
+}

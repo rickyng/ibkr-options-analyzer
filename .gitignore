@@ -1,0 +1,86 @@
+# .gitignore for IBKR Options Analyzer
+
+# Build directories
+build/
+cmake-build-*/
+out/
+
+# Claude Code settings (may contain sensitive permissions)
+.claude/settings.local.json
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Compiled files
+*.o
+*.obj
+*.exe
+*.out
+*.app
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# Configuration and data files (NEVER commit these!)
+config.json
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Log files
+*.log
+logs/
+
+# Downloaded CSV files
+*.csv
+flex_reports/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Environment files
+.env
+.env.local
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.directory
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Core dumps
+core
+core.*
