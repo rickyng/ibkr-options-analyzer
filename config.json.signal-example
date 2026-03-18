@@ -1,0 +1,52 @@
+{
+  "accounts": [
+    {
+      "name": "Main Account",
+      "token": "YOUR_FLEX_TOKEN_HERE",
+      "query_id": "YOUR_QUERY_ID_HERE",
+      "enabled": true
+    },
+    {
+      "name": "Secondary Account",
+      "token": "YOUR_FLEX_TOKEN_HERE",
+      "query_id": "YOUR_QUERY_ID_HERE",
+      "enabled": false
+    }
+  ],
+  "database": {
+    "path": "~/.ibkr-options-analyzer/data.db"
+  },
+  "logging": {
+    "level": "info",
+    "file": "~/.ibkr-options-analyzer/logs/app.log"
+  },
+  "http": {
+    "user_agent": "IBKROptionsAnalyzer/1.0",
+    "timeout_seconds": 30,
+    "max_retries": 5,
+    "retry_delay_ms": 2000
+  },
+  "flex": {
+    "poll_interval_seconds": 5,
+    "max_poll_duration_seconds": 300
+  },
+  "notifications": {
+    "signal": {
+      "enabled": false,
+      "api_host": "localhost",
+      "api_port": 8080,
+      "from_number": "+1234567890",
+      "recipients": [
+        "+0987654321"
+      ]
+    }
+  },
+  "risk_thresholds": {
+    "max_portfolio_delta": 1000.0,
+    "max_position_size": 50000.0,
+    "alert_on_breach": true
+  },
+  "price_sources": {
+    "alpha_vantage_api_key": ""
+  }
+}

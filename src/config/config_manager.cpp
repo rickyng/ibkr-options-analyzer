@@ -170,6 +170,47 @@ Result<Config> ConfigManager::parse_json(const nlohmann::json& j) {
         config.logging.file = expand_path("~/.ibkr-options-analyzer/logs/app.log");
     }
 
+    // Parse notifications config (optional)
+    if (j.contains("notifications")) {
+        const auto& notifications = j["notifications"];
+
+        // Parse Signal config
+        if (notifications.contains("signal")) {
+            const auto& signal = notifications["signal"];
+            if (signal.contains("enabled")) {
+                config.notifications.signal.enabled = signal["enabled"].get<bool>();
+            }
+            if (signal.contains("api_host")) {
+                config.notifications.signal.api_host = signal["api_host"].get<std::string>();
+            }
+            if (signal.contains("api_port")) {
+                config.notifications.signal.api_port = signal["api_port"].get<int>();
+            }
+            if (signal.contains("from_number")) {
+                config.notifications.signal.from_number = signal["from_number"].get<std::string>();
+            }
+            if (signal.contains("recipients") && signal["recipients"].is_array()) {
+                for (const auto& recipient : signal["recipients"]) {
+                    config.notifications.signal.recipients.push_back(recipient.get<std::string>());
+                }
+            }
+        }
+    }
+
+    // Parse risk thresholds (optional with defaults)
+    if (j.contains("risk_thresholds")) {
+        const auto& thresholds = j["risk_thresholds"];
+        if (thresholds.contains("max_portfolio_delta")) {
+            config.risk_thresholds.max_portfolio_delta = thresholds["max_portfolio_delta"].get<double>();
+        }
+        if (thresholds.contains("max_position_size")) {
+            config.risk_thresholds.max_position_size = thresholds["max_position_size"].get<double>();
+        }
+        if (thresholds.contains("alert_on_breach")) {
+            config.risk_thresholds.alert_on_breach = thresholds["alert_on_breach"].get<bool>();
+        }
+    }
+
     return config;
 }
 
@@ -263,6 +304,27 @@ Result<void> ConfigManager::validate(const Config& config) {
     }
     if (config.logging.max_files <= 0) {
         return Error{"Logging max_files must be positive"};
+    }
+
+    // Validate Signal config (if enabled)
+    if (config.notifications.signal.enabled) {
+        if (config.notifications.signal.from_number.empty()) {
+            return Error{"Signal notifications enabled but from_number is empty"};
+        }
+        if (config.notifications.signal.recipients.empty()) {
+            return Error{"Signal notifications enabled but no recipients configured"};
+        }
+        if (config.notifications.signal.api_port <= 0 || config.notifications.signal.api_port > 65535) {
+            return Error{"Signal API port must be between 1 and 65535"};
+        }
+    }
+
+    // Validate risk thresholds
+    if (config.risk_thresholds.max_portfolio_delta <= 0) {
+        return Error{"Risk threshold max_portfolio_delta must be positive"};
+    }
+    if (config.risk_thresholds.max_position_size <= 0) {
+        return Error{"Risk threshold max_position_size must be positive"};
     }
 
     return Result<void>{};

@@ -54,6 +54,33 @@ struct LoggingConfig {
 };
 
 /**
+ * Signal notification configuration.
+ */
+struct SignalConfig {
+    bool enabled{false};
+    std::string api_host{"localhost"};
+    int api_port{8080};
+    std::string from_number;
+    std::vector<std::string> recipients;
+};
+
+/**
+ * Notification configuration.
+ */
+struct NotificationConfig {
+    SignalConfig signal;
+};
+
+/**
+ * Risk threshold configuration.
+ */
+struct RiskThresholdConfig {
+    double max_portfolio_delta{1000.0};
+    double max_position_size{50000.0};
+    bool alert_on_breach{true};
+};
+
+/**
  * Main application configuration.
  */
 struct Config {
@@ -62,6 +89,8 @@ struct Config {
     HttpConfig http;
     FlexConfig flex;
     LoggingConfig logging;
+    NotificationConfig notifications;
+    RiskThresholdConfig risk_thresholds;
 };
 
 /**

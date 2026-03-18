@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  signal-api:
+    image: bbernhard/signal-cli-rest-api:latest
+    container_name: ibkr-signal-notifier
+    environment:
+      - MODE=native
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persist Signal registration data
+      - ~/.ibkr-options-analyzer/signal-cli:/home/.local/share/signal-cli
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/about"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

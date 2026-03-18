@@ -9,6 +9,8 @@ Modern C++20 command-line tool for tracking and analyzing non-expired open optio
 - **Smart filtering**: Only non-expired options (expiry > current date)
 - **Strategy detection**: Auto-detect naked short puts, spreads, covered calls
 - **Risk analysis**: Breakeven, max profit/loss, distance to strike, portfolio totals
+- **Real-time prices**: Fetch current stock prices from Yahoo Finance / Alpha Vantage
+- **Signal notifications**: Send risk alerts via Signal messenger (optional)
 - **Manual position entry**: Add custom/what-if positions for analysis
 - **Export capabilities**: CSV export for Excel/Google Sheets
 
@@ -255,6 +257,63 @@ Main Account | AAPL  250321P00150000| AAPL      | 2025-03-21 | 150.00 | P     | 
 - **Short Put Spread**: Short put + long put (lower strike), same expiry
 - **Covered Call**: Long stock + short call
 - **Iron Condor**: Short put spread + short call spread
+
+## Signal Notifications (Optional)
+
+Send risk alerts via Signal messenger when thresholds are breached.
+
+### Setup
+
+1. **Start Signal API container:**
+```bash
+docker-compose up -d signal-api
+```
+
+2. **Register your phone number** (use a dedicated number, NOT your personal Signal):
+```bash
+curl -X POST http://localhost:8080/v1/register/+1234567890
+```
+
+3. **Verify with SMS code:**
+```bash
+curl -X POST http://localhost:8080/v1/register/+1234567890/verify/123456
+```
+
+4. **Update config.json:**
+```json
+{
+  "notifications": {
+    "signal": {
+      "enabled": true,
+      "api_host": "localhost",
+      "api_port": 8080,
+      "from_number": "+1234567890",
+      "recipients": ["+0987654321"]
+    }
+  },
+  "risk_thresholds": {
+    "max_portfolio_delta": 1000.0,
+    "alert_on_breach": true
+  }
+}
+```
+
+5. **Test setup:**
+```bash
+./test_signal.sh
+```
+
+See [SIGNAL_SETUP.md](SIGNAL_SETUP.md) for detailed instructions.
+
+### Usage with Cron
+
+```bash
+# Run analysis every hour and send alerts if thresholds breached
+0 * * * * /path/to/ibkr-options-analyzer analyze --alert-signal
+
+# Daily summary at 9 AM
+0 9 * * * /path/to/ibkr-options-analyzer report --signal-summary
+```
 
 ## Troubleshooting
 
