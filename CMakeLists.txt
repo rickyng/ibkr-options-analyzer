@@ -150,6 +150,8 @@ add_executable(ibkr-options-analyzer
     src/utils/logger.hpp
     src/utils/http_client.cpp
     src/utils/http_client.hpp
+    src/utils/price_fetcher.cpp
+    src/utils/price_fetcher.hpp
 )
 
 target_include_directories(ibkr-options-analyzer PRIVATE

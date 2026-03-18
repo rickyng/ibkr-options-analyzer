@@ -117,8 +117,13 @@ int main(int argc, char** argv) {
     );
 
     ibkr::utils::Logger::info("IBKR Options Analyzer v1.0.0");
-    ibkr::utils::Logger::debug("Config loaded: {} accounts, database: {}",
-                              config.accounts.size(), config.database.path);
+    if (!config.accounts.empty()) {
+        ibkr::utils::Logger::debug("Config loaded: {} accounts, database: {}",
+                                  config.accounts.size(), config.database.path);
+    } else {
+        ibkr::utils::Logger::debug("Config loaded: no accounts configured (using command-line args), database: {}",
+                                  config.database.path);
+    }
 
     // Execute subcommand
     try {

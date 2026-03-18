@@ -3,10 +3,13 @@
 #include "analysis/strategy_detector.hpp"
 #include "analysis/risk_calculator.hpp"
 #include "utils/logger.hpp"
+#include "utils/price_fetcher.hpp"
 #include <iostream>
 #include <iomanip>
 #include <map>
+#include <set>
 #include <algorithm>
+#include <cmath>
 
 namespace ibkr::commands {
 
@@ -125,6 +128,18 @@ Result<void> AnalyzeCommand::analyze_open(
     std::cout << "):\n";
     std::cout << std::string(80, '=') << "\n";
 
+    // Collect unique underlyings for price fetching
+    std::set<std::string> unique_underlyings;
+    for (const auto& pos : positions) {
+        unique_underlyings.insert(pos.underlying);
+    }
+
+    // Fetch current prices
+    Logger::info("Fetching current prices for {} underlyings", unique_underlyings.size());
+    utils::PriceFetcher price_fetcher;
+    std::vector<std::string> symbols(unique_underlyings.begin(), unique_underlyings.end());
+    auto current_prices = price_fetcher.fetch_prices(symbols);
+
     // Show consolidated view by account
     for (const auto& [account_name, by_underlying] : by_account_and_underlying) {
         std::cout << "\n[" << account_name << "]\n";
@@ -133,7 +148,14 @@ Result<void> AnalyzeCommand::analyze_open(
         for (const auto& [underlying, positions_list] : by_underlying) {
             std::cout << "\n  " << underlying << " (" << positions_list.size() << " position";
             if (positions_list.size() != 1) std::cout << "s";
-            std::cout << "):\n";
+            std::cout << ")";
+
+            // Show current price if available
+            if (current_prices.count(underlying)) {
+                std::cout << " - Current: $" << std::fixed << std::setprecision(2)
+                          << current_prices[underlying].price;
+            }
+            std::cout << ":\n";
 
             for (const auto& pos : positions_list) {
                 int days_to_expiry = RiskCalculator::calculate_days_to_expiry(pos.expiry);
@@ -146,9 +168,289 @@ Result<void> AnalyzeCommand::analyze_open(
                     std::cout << " [MANUAL]";
                 }
 
-                std::cout << " (" << days_to_expiry << " days)\n";
+                std::cout << " (" << days_to_expiry << " days)";
+
+                // Calculate assignment risk if price is available
+                if (current_prices.count(underlying)) {
+                    double current_price = current_prices[underlying].price;
+                    double strike = pos.strike;
+
+                    if (pos.quantity < 0) {  // Short position
+                        if (pos.right == 'P') {
+                            // Short put: at risk if stock < strike
+                            double distance_pct = ((current_price - strike) / current_price) * 100.0;
+                            if (current_price < strike) {
+                                std::cout << " ⚠️  ITM by " << std::abs(distance_pct) << "%";
+                            } else if (distance_pct < 5.0) {
+                                std::cout << " ⚡ Near strike (" << distance_pct << "%)";
+                            }
+                        } else if (pos.right == 'C') {
+                            // Short call: at risk if stock > strike
+                            double distance_pct = ((strike - current_price) / current_price) * 100.0;
+                            if (current_price > strike) {
+                                std::cout << " ⚠️  ITM by " << std::abs(distance_pct) << "%";
+                            } else if (distance_pct < 5.0) {
+                                std::cout << " ⚡ Near strike (" << distance_pct << "%)";
+                            }
+                        }
+                    }
+                }
+
+                std::cout << "\n";
             }
         }
+    }
+
+    // Add consolidated portfolio summary
+    std::cout << "\n" << std::string(80, '=') << "\n";
+    std::cout << "CONSOLIDATED PORTFOLIO SUMMARY\n";
+    std::cout << std::string(80, '=') << "\n";
+
+    // Calculate totals
+    int total_positions = positions.size();
+    int short_puts = 0;
+    int short_calls = 0;
+    int long_positions = 0;
+    int expiring_7_days = 0;
+    int expiring_30_days = 0;
+    double total_premium_collected = 0.0;
+    double total_max_loss = 0.0;
+
+    // Risk level categorization
+    struct PositionInfo {
+        std::string label;
+        std::string expiry;
+        std::string account_name;
+        double assignment_capital;
+    };
+
+    struct RiskLevel {
+        int count = 0;
+        double assignment_capital = 0.0;  // Capital needed if assigned
+        std::vector<PositionInfo> positions;
+    };
+
+    RiskLevel level1;  // ITM or within 1% OTM
+    RiskLevel level2;  // 1-5% OTM
+    RiskLevel level3;  // 5-10% OTM
+    RiskLevel level4;  // >10% OTM (safe)
+
+    for (const auto& pos : positions) {
+        int days = RiskCalculator::calculate_days_to_expiry(pos.expiry);
+
+        if (days <= 7) expiring_7_days++;
+        if (days <= 30) expiring_30_days++;
+
+        // Get account name for this position
+        SQLite::Statement query(*db_ptr, "SELECT name FROM accounts WHERE id = ?");
+        query.bind(1, pos.account_id);
+        std::string account_name = "Unknown";
+        if (query.executeStep()) {
+            account_name = query.getColumn(0).getString();
+        }
+
+        if (pos.quantity < 0) {
+            // Short position
+            double premium = std::abs(pos.quantity) * pos.entry_premium * 100.0;
+            total_premium_collected += premium;
+
+            if (pos.right == 'P') {
+                short_puts++;
+                double max_loss = (pos.strike * 100.0 * std::abs(pos.quantity)) - premium;
+                total_max_loss += max_loss;
+
+                // Calculate assignment capital (strike * 100 * quantity)
+                double assignment_capital = pos.strike * 100.0 * std::abs(pos.quantity);
+
+                // Categorize by risk level
+                if (current_prices.count(pos.underlying)) {
+                    double current_price = current_prices[pos.underlying].price;
+                    double distance_pct = ((current_price - pos.strike) / current_price) * 100.0;
+
+                    PositionInfo info;
+                    info.label = pos.underlying + " $" + std::to_string(static_cast<int>(pos.strike)) + "P";
+                    info.expiry = pos.expiry;
+                    info.account_name = account_name;
+                    info.assignment_capital = assignment_capital;
+
+                    if (current_price <= pos.strike || distance_pct <= 1.0) {
+                        // Level 1: ITM or within 1% OTM
+                        level1.count++;
+                        level1.assignment_capital += assignment_capital;
+                        level1.positions.push_back(info);
+                    } else if (distance_pct <= 5.0) {
+                        // Level 2: 1-5% OTM
+                        level2.count++;
+                        level2.assignment_capital += assignment_capital;
+                        level2.positions.push_back(info);
+                    } else if (distance_pct <= 10.0) {
+                        // Level 3: 5-10% OTM
+                        level3.count++;
+                        level3.assignment_capital += assignment_capital;
+                        level3.positions.push_back(info);
+                    } else {
+                        // Level 4: >10% OTM (safe)
+                        level4.count++;
+                        level4.assignment_capital += assignment_capital;
+                        level4.positions.push_back(info);
+                    }
+                } else {
+                    // No price available, assume safe
+                    PositionInfo info;
+                    info.label = pos.underlying + " $" + std::to_string(static_cast<int>(pos.strike)) + "P";
+                    info.expiry = pos.expiry;
+                    info.account_name = account_name;
+                    info.assignment_capital = assignment_capital;
+                    level4.count++;
+                    level4.assignment_capital += assignment_capital;
+                    level4.positions.push_back(info);
+                }
+            } else if (pos.right == 'C') {
+                short_calls++;
+
+                // For short calls, assignment means delivering shares
+                // Capital impact is unlimited (or current price * 100 * quantity if assigned)
+                if (current_prices.count(pos.underlying)) {
+                    double current_price = current_prices[pos.underlying].price;
+                    double distance_pct = ((pos.strike - current_price) / current_price) * 100.0;
+
+                    PositionInfo info;
+                    info.label = pos.underlying + " $" + std::to_string(static_cast<int>(pos.strike)) + "C";
+                    info.expiry = pos.expiry;
+                    info.account_name = account_name;
+                    info.assignment_capital = 0.0;  // Calls don't require capital (deliver shares)
+
+                    if (current_price >= pos.strike || distance_pct <= 1.0) {
+                        // Level 1: ITM or within 1% OTM
+                        level1.count++;
+                        level1.positions.push_back(info);
+                    } else if (distance_pct <= 5.0) {
+                        // Level 2: 1-5% OTM
+                        level2.count++;
+                        level2.positions.push_back(info);
+                    } else if (distance_pct <= 10.0) {
+                        // Level 3: 5-10% OTM
+                        level3.count++;
+                        level3.positions.push_back(info);
+                    } else {
+                        // Level 4: >10% OTM (safe)
+                        level4.count++;
+                        level4.positions.push_back(info);
+                    }
+                }
+            }
+        } else {
+            long_positions++;
+        }
+    }
+
+    std::cout << "\nPosition Breakdown:\n";
+    std::cout << "  Total Positions: " << total_positions << "\n";
+    std::cout << "  Short Puts: " << short_puts << "\n";
+    std::cout << "  Short Calls: " << short_calls << "\n";
+    std::cout << "  Long Positions: " << long_positions << "\n";
+
+    std::cout << "\nExpiration Schedule:\n";
+    std::cout << "  Expiring in 7 days: " << expiring_7_days << " positions\n";
+    std::cout << "  Expiring in 30 days: " << expiring_30_days << " positions\n";
+
+    std::cout << "\nRisk Summary:\n";
+    std::cout << "  Total Premium Collected: $" << std::fixed << std::setprecision(2)
+              << total_premium_collected << "\n";
+    std::cout << "  Total Max Loss (short puts): $" << total_max_loss << "\n";
+    if (short_calls > 0) {
+        std::cout << "  Short Calls Max Loss: UNLIMITED (" << short_calls << " positions)\n";
+    }
+
+    // Risk Level Categorization
+    std::cout << "\n" << std::string(80, '-') << "\n";
+    std::cout << "ASSIGNMENT RISK LEVELS\n";
+    std::cout << std::string(80, '-') << "\n";
+
+    // Sort positions by account, then by expiry date within each level
+    auto sort_by_account_and_expiry = [](std::vector<PositionInfo>& positions) {
+        std::sort(positions.begin(), positions.end(),
+            [](const PositionInfo& a, const PositionInfo& b) {
+                if (a.account_name != b.account_name) {
+                    return a.account_name < b.account_name;
+                }
+                return a.expiry < b.expiry;
+            });
+    };
+
+    sort_by_account_and_expiry(level1.positions);
+    sort_by_account_and_expiry(level2.positions);
+    sort_by_account_and_expiry(level3.positions);
+    sort_by_account_and_expiry(level4.positions);
+
+    // Helper function to display positions grouped by account
+    auto display_positions = [](const std::vector<PositionInfo>& positions) {
+        if (positions.empty()) return;
+
+        std::string current_account = "";
+        for (const auto& pos : positions) {
+            if (pos.account_name != current_account) {
+                if (!current_account.empty()) {
+                    std::cout << "\n";
+                }
+                std::cout << "  [" << pos.account_name << "]:\n";
+                current_account = pos.account_name;
+            }
+            std::cout << "    " << pos.expiry << " - " << pos.label;
+            if (pos.assignment_capital > 0) {
+                std::cout << " ($" << std::fixed << std::setprecision(0) << pos.assignment_capital << ")";
+            }
+            std::cout << "\n";
+        }
+    };
+
+    std::cout << "\nLevel 1 - CRITICAL (ITM or ≤1% OTM):\n";
+    std::cout << "  Positions: " << level1.count << "\n";
+    if (level1.count > 0) {
+        std::cout << "  Capital if Assigned: $" << std::fixed << std::setprecision(2)
+                  << level1.assignment_capital << "\n";
+        display_positions(level1.positions);
+    }
+
+    std::cout << "\nLevel 2 - HIGH (1-5% OTM):\n";
+    std::cout << "  Positions: " << level2.count << "\n";
+    if (level2.count > 0) {
+        std::cout << "  Capital if Assigned: $" << std::fixed << std::setprecision(2)
+                  << level2.assignment_capital << "\n";
+        display_positions(level2.positions);
+    }
+
+    std::cout << "\nLevel 3 - MODERATE (5-10% OTM):\n";
+    std::cout << "  Positions: " << level3.count << "\n";
+    if (level3.count > 0) {
+        std::cout << "  Capital if Assigned: $" << std::fixed << std::setprecision(2)
+                  << level3.assignment_capital << "\n";
+        display_positions(level3.positions);
+    }
+
+    std::cout << "\nLevel 4 - SAFE (>10% OTM):\n";
+    std::cout << "  Positions: " << level4.count << "\n";
+    if (level4.count > 0) {
+        std::cout << "  Capital if Assigned: $" << std::fixed << std::setprecision(2)
+                  << level4.assignment_capital << "\n";
+    }
+
+    // Total capital at risk summary
+    double total_critical_capital = level1.assignment_capital + level2.assignment_capital;
+    double total_all_capital = level1.assignment_capital + level2.assignment_capital +
+                               level3.assignment_capital + level4.assignment_capital;
+
+    std::cout << "\n" << std::string(80, '-') << "\n";
+    std::cout << "CAPITAL REQUIREMENTS:\n";
+    std::cout << "  Critical Risk (L1+L2): $" << std::fixed << std::setprecision(2)
+              << total_critical_capital << " (" << (level1.count + level2.count) << " positions)\n";
+    std::cout << "  Total if All Assigned: $" << total_all_capital
+              << " (" << (level1.count + level2.count + level3.count + level4.count) << " positions)\n";
+
+    if (current_prices.size() < unique_underlyings.size()) {
+        std::cout << "\n⚠️  Note: Could not fetch prices for "
+                  << (unique_underlyings.size() - current_prices.size())
+                  << " underlyings\n";
     }
 
     std::cout << "\n";

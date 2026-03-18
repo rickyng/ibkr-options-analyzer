@@ -86,24 +86,22 @@ Result<Config> ConfigManager::load(const std::string& config_path) {
 Result<Config> ConfigManager::parse_json(const nlohmann::json& j) {
     Config config;
 
-    // Parse accounts (required)
-    if (!j.contains("accounts")) {
-        return Error{"Missing required field: accounts"};
-    }
-
-    if (!j["accounts"].is_array()) {
-        return Error{"Field 'accounts' must be an array"};
-    }
-
-    for (const auto& account_json : j["accounts"]) {
-        auto account_result = parse_account(account_json);
-        if (!account_result) {
-            return Error{
-                "Failed to parse account",
-                account_result.error().message
-            };
+    // Parse accounts (optional - can be provided via command line)
+    if (j.contains("accounts")) {
+        if (!j["accounts"].is_array()) {
+            return Error{"Field 'accounts' must be an array"};
         }
-        config.accounts.push_back(*account_result);
+
+        for (const auto& account_json : j["accounts"]) {
+            auto account_result = parse_account(account_json);
+            if (!account_result) {
+                return Error{
+                    "Failed to parse account",
+                    account_result.error().message
+                };
+            }
+            config.accounts.push_back(*account_result);
+        }
     }
 
     // Parse database (required)
@@ -205,34 +203,33 @@ Result<AccountConfig> ConfigManager::parse_account(const nlohmann::json& j) {
 }
 
 Result<void> ConfigManager::validate(const Config& config) {
-    // Validate at least one account
-    if (config.accounts.empty()) {
-        return Error{"No accounts configured"};
-    }
-
-    // Validate at least one enabled account
-    bool has_enabled = false;
-    for (const auto& account : config.accounts) {
-        if (account.enabled) {
-            has_enabled = true;
-            break;
+    // Accounts are optional (can be provided via command line)
+    // If accounts are configured, validate them
+    if (!config.accounts.empty()) {
+        // Validate at least one enabled account
+        bool has_enabled = false;
+        for (const auto& account : config.accounts) {
+            if (account.enabled) {
+                has_enabled = true;
+                break;
+            }
         }
-    }
 
-    if (!has_enabled) {
-        return Error{"No enabled accounts found"};
-    }
+        if (!has_enabled) {
+            return Error{"No enabled accounts found"};
+        }
 
-    // Validate account fields
-    for (const auto& account : config.accounts) {
-        if (account.name.empty()) {
-            return Error{"Account has empty name"};
-        }
-        if (account.token.empty()) {
-            return Error{"Account '" + account.name + "' has empty token"};
-        }
-        if (account.query_id.empty()) {
-            return Error{"Account '" + account.name + "' has empty query_id"};
+        // Validate account fields
+        for (const auto& account : config.accounts) {
+            if (account.name.empty()) {
+                return Error{"Account has empty name"};
+            }
+            if (account.token.empty()) {
+                return Error{"Account '" + account.name + "' has empty token"};
+            }
+            if (account.query_id.empty()) {
+                return Error{"Account '" + account.name + "' has empty query_id"};
+            }
         }
     }
 

@@ -1,0 +1,9 @@
+{
+  "database": {
+    "path": "~/.ibkr-options-analyzer/data.db"
+  },
+  "logging": {
+    "level": "info",
+    "file": "~/.ibkr-options-analyzer/logs/app.log"
+  }
+}

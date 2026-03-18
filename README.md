@@ -88,59 +88,43 @@ cmake --build build/release
 ### 3. Configure the Tool
 
 ```bash
+# Run setup script
+./setup.sh
+```
+
+Or manually:
+
+```bash
 # Create config directory
 mkdir -p ~/.ibkr-options-analyzer/logs
 
-# Copy example config
-cp config.json.example ~/.ibkr-options-analyzer/config.json
-
-# Edit config with your tokens and query IDs
-nano ~/.ibkr-options-analyzer/config.json
+# Copy minimal config
+cp config.json.minimal ~/.ibkr-options-analyzer/config.json
 ```
 
-**config.json structure:**
+**Minimal config.json:**
 ```json
 {
-  "accounts": [
-    {
-      "name": "Main Account",
-      "token": "YOUR_FLEX_TOKEN_HERE",
-      "query_id": "YOUR_QUERY_ID_HERE",
-      "enabled": true
-    }
-  ],
   "database": {
     "path": "~/.ibkr-options-analyzer/data.db"
   },
-  "http": {
-    "user_agent": "IBKROptionsAnalyzer/1.0 (personal tool)",
-    "timeout_seconds": 30,
-    "max_retries": 5,
-    "retry_delay_ms": 2000
-  },
-  "flex": {
-    "poll_interval_seconds": 5,
-    "max_poll_duration_seconds": 300
-  },
   "logging": {
     "level": "info",
-    "file": "~/.ibkr-options-analyzer/logs/app.log",
-    "max_file_size_mb": 10,
-    "max_files": 5
+    "file": "~/.ibkr-options-analyzer/logs/app.log"
   }
 }
 ```
 
-**Security Note**: Set restrictive permissions on config.json:
-```bash
-chmod 600 ~/.ibkr-options-analyzer/config.json
-```
+**Note**: Account credentials (token and query_id) are provided via command-line arguments, not stored in the config file.
 
 ### 4. First Run
 
 ```bash
-# Download data from all enabled accounts
-./build/release/ibkr-options-analyzer download
+# Download data using command-line credentials
+./build/release/ibkr-options-analyzer download \
+  --token YOUR_FLEX_TOKEN \
+  --query-id YOUR_QUERY_ID \
+  --account "Main Account"
 
 # Import downloaded data into database
 ./build/release/ibkr-options-analyzer import
@@ -155,18 +139,44 @@ chmod 600 ~/.ibkr-options-analyzer/config.json
 ./build/release/ibkr-options-analyzer report --output report.csv
 ```
 
+**Security Tip**: For automation, use environment variables:
+```bash
+export IBKR_TOKEN="your_token_here"
+export IBKR_QUERY_ID="your_query_id"
+
+./build/release/ibkr-options-analyzer download \
+  --token "$IBKR_TOKEN" \
+  --query-id "$IBKR_QUERY_ID" \
+  --account "Main Account"
+```
+
 ## Usage
 
 ### Download Command
 ```bash
-# Download from all enabled accounts
-ibkr-options-analyzer download
-
-# Download from specific account
-ibkr-options-analyzer download --account "Main Account"
+# Download with command-line credentials
+ibkr-options-analyzer download \
+  --token YOUR_FLEX_TOKEN \
+  --query-id YOUR_QUERY_ID \
+  --account "Main Account"
 
 # Force re-download (skip cache)
-ibkr-options-analyzer download --force
+ibkr-options-analyzer download \
+  --token YOUR_FLEX_TOKEN \
+  --query-id YOUR_QUERY_ID \
+  --account "Main Account" \
+  --force
+
+# Multiple accounts - run command multiple times
+ibkr-options-analyzer download \
+  --token TOKEN1 \
+  --query-id QUERY1 \
+  --account "Trading Account"
+
+ibkr-options-analyzer download \
+  --token TOKEN2 \
+  --query-id QUERY2 \
+  --account "IRA Account"
 ```
 
 ### Import Command
@@ -252,11 +262,13 @@ Main Account | AAPL  250321P00150000| AAPL      | 2025-03-21 | 150.00 | P     | 
 - Flex tokens are tied to your IP address
 - Regenerate token in IBKR Account Management if your IP changed
 - Ensure token is correctly copied (no extra spaces)
+- Use the new token with `--token` argument
 
 ### "Query ID not found"
 - Verify Query ID in IBKR Account Management → Flex Queries
 - Ensure query includes both Trades and Open Positions sections
 - Query must be saved (not just created)
+- Use the correct query ID with `--query-id` argument
 
 ### "No data returned"
 - Check date range in Flex Query (must include recent trades)
