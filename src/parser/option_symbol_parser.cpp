@@ -156,6 +156,8 @@ std::string OptionSymbolParser::convert_date_format(const std::string& yymmdd) {
     std::string dd = yymmdd.substr(4, 2);
 
     // Convert YY to YYYY (assume 20YY for years 00-99)
+    // Note: This will be incorrect for expiry years >= 2050.
+    // A pivot-based approach (e.g., 50 → 2050, 51 → 1951) could be used if needed.
     int year_int = std::stoi(yy);
     int full_year = 2000 + year_int;
 

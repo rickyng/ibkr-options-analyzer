@@ -44,7 +44,7 @@ Result<std::string> FlexDownloader::download_report(
     }
 
     const auto& send_response = *send_result;
-    Logger::info("Flex request sent successfully. ReferenceCode: {}", send_response.reference_code);
+    Logger::info("Flex request sent successfully. ReferenceCode: [REDACTED]");
 
     // Step 2: Poll until report is ready (use the URL from SendRequest response if provided)
     auto csv_result = poll_until_ready(account.token, send_response.reference_code, send_response.url);
@@ -115,6 +115,8 @@ Result<SendRequestResponse> FlexDownloader::send_request(
     params["q"] = query_id;
     params["v"] = "3";  // API version 3
 
+    Logger::debug("Request params: t=[REDACTED], q={}, v=3", query_id);
+
     auto http_result = http_client_->get(SEND_REQUEST_PATH, params);
     if (!http_result) {
         return Error{
@@ -172,10 +174,12 @@ Result<GetStatementResponse> FlexDownloader::get_statement(
 
     // Build request URL with query parameters
     // IMPORTANT: IBKR requires parameters in specific order: t, q, v
-    std::string full_path = std::string(GET_STATEMENT_PATH) + "?t=" + token + "&q=" + reference_code + "&v=3";
-    Logger::debug("Full request path: {}", full_path);
-    Logger::debug("Token (first 10 chars): {}...", token.substr(0, std::min(size_t(10), token.length())));
-    Logger::debug("Reference code: {}", reference_code);
+    std::string full_path = std::string(GET_STATEMENT_PATH) + "?t=[REDACTED]&q=" + reference_code + "&v=3";
+    Logger::debug("Request path: {}", full_path);
+    // Rebuild with actual token for the HTTP request
+    full_path = std::string(GET_STATEMENT_PATH) + "?t=" + token + "&q=" + reference_code + "&v=3";
+    Logger::debug("Token length: {}", token.length());
+    Logger::debug("Reference code: [REDACTED]");
 
     auto http_result = http_client_->get(full_path, {});
     if (!http_result) {
@@ -191,12 +195,7 @@ Result<GetStatementResponse> FlexDownloader::get_statement(
     // Log response for debugging
     Logger::debug("GetStatement HTTP status: {}", response.status_code);
     Logger::debug("GetStatement response headers count: {}", response.headers.size());
-    for (const auto& [key, value] : response.headers) {
-        Logger::debug("  Header: {} = {}", key, value);
-    }
     Logger::debug("GetStatement response body length: {}", response.body.length());
-    Logger::debug("GetStatement response body (first 500 chars): {}",
-                 response.body.substr(0, std::min(size_t(500), response.body.size())));
 
     // Check for HTTP errors (same as SendRequest)
     if (response.status_code == 401) {
@@ -215,7 +214,6 @@ Result<GetStatementResponse> FlexDownloader::get_statement(
     auto parse_result = parse_get_statement_response(response.body);
     if (!parse_result) {
         Logger::error("Failed to parse GetStatement response: {}", parse_result.error().format());
-        Logger::error("Response body was: {}", response.body);
     } else {
         Logger::debug("Parse successful, status: {}",
                      static_cast<int>(parse_result->status));
@@ -297,7 +295,7 @@ Result<SendRequestResponse> FlexDownloader::parse_send_request_response(
     const std::string& xml_content) {
 
     pugi::xml_document doc;
-    pugi::xml_parse_result parse_result = doc.load_string(xml_content.c_str());
+    pugi::xml_parse_result parse_result = doc.load_string(xml_content.c_str(), pugi::parse_minimal);
 
     if (!parse_result) {
         return Error{
@@ -363,7 +361,7 @@ Result<GetStatementResponse> FlexDownloader::parse_get_statement_response(
 
     // Try to parse as XML
     pugi::xml_document doc;
-    pugi::xml_parse_result parse_result = doc.load_string(xml_content.c_str());
+    pugi::xml_parse_result parse_result = doc.load_string(xml_content.c_str(), pugi::parse_minimal);
 
     if (!parse_result) {
         // If XML parsing fails and content looks like CSV, treat as CSV
@@ -482,8 +480,10 @@ std::string FlexDownloader::generate_filename(const std::string& account_name) c
     std::replace(sanitized_name.begin(), sanitized_name.end(), ' ', '_');
     oss << sanitized_name << "_";
 
-    // Add timestamp
-    oss << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S");
+    // Add timestamp (use thread-safe localtime_r on POSIX)
+    std::tm tm_buf;
+    localtime_r(&time_t, &tm_buf);
+    oss << std::put_time(&tm_buf, "%Y%m%d_%H%M%S");
     oss << ".csv";
 
     return oss.str();

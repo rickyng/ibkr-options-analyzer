@@ -99,6 +99,11 @@ private:
      * Build query string from parameters
      */
     std::string build_query_string(const std::map<std::string, std::string>& params) const;
+
+    /**
+     * URL-encode a string using percent-encoding (RFC 3986)
+     */
+    std::string url_encode(const std::string& value) const;
 };
 
 } // namespace ibkr::utils

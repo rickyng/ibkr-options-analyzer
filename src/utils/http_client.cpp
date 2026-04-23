@@ -4,6 +4,7 @@
 #include <thread>
 #include <sstream>
 #include <iomanip>
+#include <cctype>
 
 namespace ibkr::utils {
 
@@ -198,11 +199,11 @@ bool HttpClient::is_retryable_error(int status_code) const {
 
 std::chrono::milliseconds HttpClient::calculate_retry_delay(int attempt) const {
     // Exponential backoff: initial_delay * 2^attempt
-    int delay_ms = initial_retry_delay_ms_ * (1 << attempt);
+    long delay_ms = static_cast<long>(initial_retry_delay_ms_) * (1L << attempt);
 
     // Cap at 60 seconds
-    if (delay_ms > 60000) {
-        delay_ms = 60000;
+    if (delay_ms > 60000L) {
+        delay_ms = 60000L;
     }
 
     return std::chrono::milliseconds(delay_ms);
@@ -220,12 +221,26 @@ std::string HttpClient::build_query_string(
         }
         first = false;
 
-        // URL encode key and value (simple implementation)
-        // For production, use a proper URL encoding library
-        oss << key << "=" << value;
+        oss << url_encode(key) << "=" << url_encode(value);
     }
 
     return oss.str();
+}
+
+std::string HttpClient::url_encode(const std::string& value) const {
+    std::ostringstream escaped;
+    escaped.fill('0');
+    escaped << std::hex;
+
+    for (unsigned char c : value) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            escaped << c;
+        } else {
+            escaped << '%' << std::setw(2) << static_cast<int>(c);
+        }
+    }
+
+    return escaped.str();
 }
 
 } // namespace ibkr::utils
