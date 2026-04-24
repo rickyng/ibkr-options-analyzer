@@ -136,6 +136,18 @@ add_library(ibkr_core STATIC
     src/core/utils/price_fetcher.hpp
     src/core/utils/json_output.cpp
     src/core/utils/json_output.hpp
+    src/core/services/flex_service.cpp
+    src/core/services/flex_service.hpp
+    src/core/services/import_service.cpp
+    src/core/services/import_service.hpp
+    src/core/services/position_service.cpp
+    src/core/services/position_service.hpp
+    src/core/services/price_service.cpp
+    src/core/services/price_service.hpp
+    src/core/services/strategy_service.cpp
+    src/core/services/strategy_service.hpp
+    src/core/services/report_service.cpp
+    src/core/services/report_service.hpp
 )
 
 target_include_directories(ibkr_core PUBLIC

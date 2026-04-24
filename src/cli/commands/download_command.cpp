@@ -1,5 +1,5 @@
 #include "download_command.hpp"
-#include "flex/flex_downloader.hpp"
+#include "services/flex_service.hpp"
 #include "utils/logger.hpp"
 #include <iostream>
 
@@ -23,44 +23,16 @@ Result<void> DownloadCommand::execute(
         Logger::info("Force mode enabled (cache will be ignored)");
     }
 
-    // Validate inputs
-    if (token.empty()) {
-        return Error{"Token is required", "Use --token to specify IBKR Flex token"};
-    }
-
-    if (query_id.empty()) {
-        return Error{"Query ID is required", "Use --query-id to specify IBKR Flex query ID"};
-    }
-
-    if (account_name.empty()) {
-        return Error{"Account name is required", "Use --account to specify account name"};
-    }
-
-    // Create temporary account config
-    config::AccountConfig account;
-    account.name = account_name;
-    account.token = token;
-    account.query_id = query_id;
-    account.enabled = true;
-
-    // Create Flex downloader
-    flex::FlexDownloader downloader(config);
-
-    // Download report
-    auto result = downloader.download_report(account);
+    services::FlexService flex_service(config);
+    auto result = flex_service.download_report(token, query_id, account_name, force);
     if (!result) {
-        return Error{
-            "Download failed",
-            result.error().format()
-        };
+        return Error{"Download failed", result.error().message};
     }
-
-    Logger::info("Download complete: {}", *result);
 
     if (output_opts.json) {
-        std::cout << utils::JsonOutput::download_result(*result, account_name) << "\n";
+        std::cout << utils::JsonOutput::download_result(result->file_path, result->account_name) << "\n";
     } else if (!output_opts.quiet) {
-        std::cout << "✓ Downloaded: " << *result << "\n";
+        std::cout << "✓ Downloaded: " << result->file_path << "\n";
     }
 
     return Result<void>{};
