@@ -329,4 +329,177 @@ std::string Database::expand_path(const std::string& path) {
     return config::ConfigManager::expand_path(path);
 }
 
+// --- Account CRUD ---
+
+Result<std::vector<Database::AccountInfo>> Database::list_accounts() {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "SELECT id, name, token, query_id, enabled, created_at, updated_at "
+            "FROM accounts ORDER BY name");
+        std::vector<AccountInfo> result;
+        while (q.executeStep()) {
+            AccountInfo a;
+            a.id = q.getColumn(0).getInt64();
+            a.name = q.getColumn(1).getString();
+            a.token = q.getColumn(2).getString();
+            a.query_id = q.getColumn(3).getString();
+            a.enabled = q.getColumn(4).getInt() != 0;
+            a.created_at = q.getColumn(5).getString();
+            a.updated_at = q.getColumn(6).getString();
+            result.push_back(a);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        return Error{"Failed to list accounts", std::string(e.what())};
+    }
+}
+
+Result<Database::AccountInfo> Database::get_account(int64_t account_id) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "SELECT id, name, token, query_id, enabled, created_at, updated_at "
+            "FROM accounts WHERE id = ?");
+        q.bind(1, account_id);
+        if (!q.executeStep()) return Error{"Account not found"};
+
+        AccountInfo a;
+        a.id = q.getColumn(0).getInt64();
+        a.name = q.getColumn(1).getString();
+        a.token = q.getColumn(2).getString();
+        a.query_id = q.getColumn(3).getString();
+        a.enabled = q.getColumn(4).getInt() != 0;
+        a.created_at = q.getColumn(5).getString();
+        a.updated_at = q.getColumn(6).getString();
+        return a;
+    } catch (const std::exception& e) {
+        return Error{"Failed to get account", std::string(e.what())};
+    }
+}
+
+Result<void> Database::update_account(int64_t account_id, const std::string& token,
+                                       const std::string& query_id, bool enabled) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "UPDATE accounts SET token = ?, query_id = ?, enabled = ?, "
+            "updated_at = datetime('now') WHERE id = ?");
+        q.bind(1, token);
+        q.bind(2, query_id);
+        q.bind(3, enabled ? 1 : 0);
+        q.bind(4, account_id);
+        int rows = q.exec();
+        if (rows == 0) return Error{"Account not found"};
+        Logger::info("Updated account id={}", account_id);
+        return Result<void>{};
+    } catch (const std::exception& e) {
+        return Error{"Failed to update account", std::string(e.what())};
+    }
+}
+
+Result<void> Database::delete_account(int64_t account_id) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_, "DELETE FROM accounts WHERE id = ?");
+        q.bind(1, account_id);
+        int rows = q.exec();
+        if (rows == 0) return Error{"Account not found"};
+        Logger::info("Deleted account id={} (cascading deletes)", account_id);
+        return Result<void>{};
+    } catch (const std::exception& e) {
+        return Error{"Failed to delete account", std::string(e.what())};
+    }
+}
+
+// --- Consolidated Queries ---
+
+Result<std::vector<Database::PositionInfo>> Database::get_all_positions(
+    const std::string& account_name) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        std::string sql =
+            "SELECT o.id, o.account_id, a.name, o.symbol, o.underlying, "
+            "o.expiry, o.strike, o.right, o.quantity, o.mark_price, o.entry_premium "
+            "FROM open_options o JOIN accounts a ON a.id = o.account_id";
+        if (!account_name.empty()) sql += " WHERE a.name = ?";
+        sql += " ORDER BY o.expiry, o.underlying";
+
+        SQLite::Statement q(*db_, sql);
+        if (!account_name.empty()) q.bind(1, account_name);
+
+        std::vector<PositionInfo> result;
+        while (q.executeStep()) {
+            PositionInfo p;
+            p.id = q.getColumn(0).getInt64();
+            p.account_id = q.getColumn(1).getInt64();
+            p.account_name = q.getColumn(2).getString();
+            p.symbol = q.getColumn(3).getString();
+            p.underlying = q.getColumn(4).getString();
+            p.expiry = q.getColumn(5).getString();
+            p.strike = q.getColumn(6).getDouble();
+            std::string right_str = q.getColumn(7).getString();
+            p.right = right_str.empty() ? ' ' : right_str[0];
+            p.quantity = q.getColumn(8).getDouble();
+            p.mark_price = q.getColumn(9).getDouble();
+            p.entry_premium = q.getColumn(10).getDouble();
+            result.push_back(p);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        return Error{"Failed to get positions", std::string(e.what())};
+    }
+}
+
+Result<std::vector<Database::RiskSummary>> Database::get_consolidated_risk() {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "SELECT a.name, COALESCE(SUM(s.max_loss), 0.0), "
+            "COALESCE(SUM(s.max_profit), 0.0), COUNT(s.id) "
+            "FROM accounts a LEFT JOIN detected_strategies s ON s.account_id = a.id "
+            "GROUP BY a.id ORDER BY a.name");
+
+        std::vector<RiskSummary> result;
+        while (q.executeStep()) {
+            RiskSummary r;
+            r.account_name = q.getColumn(0).getString();
+            r.total_max_loss = q.getColumn(1).getDouble();
+            r.total_max_profit = q.getColumn(2).getDouble();
+            r.strategy_count = q.getColumn(3).getInt();
+            result.push_back(r);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        return Error{"Failed to get consolidated risk", std::string(e.what())};
+    }
+}
+
+Result<std::vector<Database::ExposureInfo>> Database::get_underlying_exposure() {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "SELECT o.underlying, COALESCE(SUM("
+            "  CASE WHEN o.quantity < 0 AND o.right = 'P' "
+            "    THEN (o.strike * 100.0 * ABS(o.quantity)) - "
+            "         (ABS(o.quantity) * o.entry_premium * 100.0) "
+            "    ELSE 0 END), 0.0), "
+            "COUNT(*) "
+            "FROM open_options o "
+            "GROUP BY o.underlying ORDER BY o.underlying");
+
+        std::vector<ExposureInfo> result;
+        while (q.executeStep()) {
+            ExposureInfo e;
+            e.underlying = q.getColumn(0).getString();
+            e.total_max_loss = q.getColumn(1).getDouble();
+            e.position_count = q.getColumn(2).getInt();
+            result.push_back(e);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        return Error{"Failed to get underlying exposure", std::string(e.what())};
+    }
+}
+
 } // namespace ibkr::db

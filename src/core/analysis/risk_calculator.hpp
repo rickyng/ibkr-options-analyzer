@@ -2,6 +2,8 @@
 
 #include "strategy_detector.hpp"
 #include "utils/result.hpp"
+#include <map>
+#include <vector>
 
 namespace ibkr::analysis {
 
@@ -76,6 +78,44 @@ public:
     };
 
     static PortfolioRisk calculate_portfolio_risk(
+        const std::vector<Strategy>& strategies,
+        const std::vector<RiskMetrics>& metrics);
+
+    /**
+     * Per-account risk breakdown.
+     */
+    struct AccountRisk {
+        std::string account_name;
+        int64_t account_id{0};
+        double total_max_profit{0.0};
+        double total_max_loss{0.0};
+        double total_capital_at_risk{0.0};
+        int strategy_count{0};
+        int positions_expiring_soon{0};
+    };
+
+    /**
+     * Break down risk by account.
+     */
+    static std::vector<AccountRisk> calculate_account_risks(
+        const std::vector<Strategy>& strategies,
+        const std::vector<RiskMetrics>& metrics);
+
+    /**
+     * Cross-account exposure per underlying.
+     */
+    struct UnderlyingExposure {
+        std::string underlying;
+        double total_max_loss{0.0};
+        double total_max_profit{0.0};
+        int position_count{0};
+        std::map<std::string, double> by_account;  // account_name → max_loss
+    };
+
+    /**
+     * Calculate exposure grouped by underlying across all accounts.
+     */
+    static std::vector<UnderlyingExposure> calculate_underlying_exposure(
         const std::vector<Strategy>& strategies,
         const std::vector<RiskMetrics>& metrics);
 };

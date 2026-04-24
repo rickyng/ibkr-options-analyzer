@@ -272,4 +272,94 @@ RiskCalculator::PortfolioRisk RiskCalculator::calculate_portfolio_risk(
     return portfolio;
 }
 
+std::vector<RiskCalculator::AccountRisk> RiskCalculator::calculate_account_risks(
+    const std::vector<Strategy>& strategies,
+    const std::vector<RiskMetrics>& metrics) {
+
+    // Group by account_id
+    std::map<int64_t, AccountRisk> by_account;
+
+    for (size_t i = 0; i < strategies.size() && i < metrics.size(); ++i) {
+        const auto& strategy = strategies[i];
+        const auto& m = metrics[i];
+
+        if (strategy.legs.empty()) continue;
+        int64_t acct_id = strategy.legs[0].account_id;
+
+        auto& ar = by_account[acct_id];
+        ar.account_id = acct_id;
+        ar.strategy_count++;
+        ar.total_max_profit += m.max_profit;
+
+        if (std::isfinite(m.max_loss)) {
+            ar.total_max_loss += m.max_loss;
+            ar.total_capital_at_risk += m.max_loss;
+        }
+
+        if (m.days_to_expiry < 7 && m.days_to_expiry >= 0) {
+            ar.positions_expiring_soon++;
+        }
+    }
+
+    // Extract values from map
+    std::vector<AccountRisk> result;
+    for (const auto& [id, ar] : by_account) {
+        result.push_back(ar);
+    }
+    return result;
+}
+
+std::vector<RiskCalculator::UnderlyingExposure> RiskCalculator::calculate_underlying_exposure(
+    const std::vector<Strategy>& strategies,
+    const std::vector<RiskMetrics>& metrics) {
+
+    // Group by underlying, tracking per-account max_loss
+    struct Exposure {
+        double total_max_loss{0.0};
+        double total_max_profit{0.0};
+        int position_count{0};
+        std::map<int64_t, double> account_max_loss;
+    };
+
+    std::map<std::string, Exposure> by_underlying;
+
+    for (size_t i = 0; i < strategies.size() && i < metrics.size(); ++i) {
+        const auto& strategy = strategies[i];
+        const auto& m = metrics[i];
+
+        auto& exp = by_underlying[strategy.underlying];
+        exp.total_max_profit += m.max_profit;
+        exp.position_count++;
+
+        if (std::isfinite(m.max_loss)) {
+            exp.total_max_loss += m.max_loss;
+
+            if (!strategy.legs.empty()) {
+                int64_t acct_id = strategy.legs[0].account_id;
+                exp.account_max_loss[acct_id] += m.max_loss;
+            }
+        }
+    }
+
+    // Convert to output vector
+    std::vector<UnderlyingExposure> result;
+    for (auto& [underlying, exp] : by_underlying) {
+        UnderlyingExposure ue;
+        ue.underlying = underlying;
+        ue.total_max_loss = exp.total_max_loss;
+        ue.total_max_profit = exp.total_max_profit;
+        ue.position_count = exp.position_count;
+
+        // Note: by_account needs account names, which the caller can resolve
+        // For now store account_id as string key
+        for (const auto& [acct_id, loss] : exp.account_max_loss) {
+            ue.by_account[std::to_string(acct_id)] = loss;
+        }
+
+        result.push_back(std::move(ue));
+    }
+
+    return result;
+}
+
 } // namespace ibkr::analysis

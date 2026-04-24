@@ -90,6 +90,60 @@ public:
      */
     utils::Result<int> get_trades_count();
 
+    // --- Account CRUD ---
+
+    struct AccountInfo {
+        int64_t id{0};
+        std::string name;
+        std::string token;
+        std::string query_id;
+        bool enabled{true};
+        std::string created_at;
+        std::string updated_at;
+    };
+
+    utils::Result<std::vector<AccountInfo>> list_accounts();
+    utils::Result<AccountInfo> get_account(int64_t account_id);
+    utils::Result<void> update_account(int64_t account_id, const std::string& token,
+                                       const std::string& query_id, bool enabled);
+    utils::Result<void> delete_account(int64_t account_id);
+
+    // --- Consolidated Queries ---
+
+    struct PositionInfo {
+        int64_t id{0};
+        int64_t account_id{0};
+        std::string account_name;
+        std::string symbol;
+        std::string underlying;
+        std::string expiry;
+        double strike{0.0};
+        char right{' '};
+        double quantity{0.0};
+        double mark_price{0.0};
+        double entry_premium{0.0};
+    };
+
+    utils::Result<std::vector<PositionInfo>> get_all_positions(
+        const std::string& account_name = "");
+
+    struct RiskSummary {
+        std::string account_name;
+        double total_max_loss{0.0};
+        double total_max_profit{0.0};
+        int strategy_count{0};
+    };
+
+    utils::Result<std::vector<RiskSummary>> get_consolidated_risk();
+
+    struct ExposureInfo {
+        std::string underlying;
+        double total_max_loss{0.0};
+        int position_count{0};
+    };
+
+    utils::Result<std::vector<ExposureInfo>> get_underlying_exposure();
+
     /**
      * Check if database is initialized.
      */
