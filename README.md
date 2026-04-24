@@ -7,8 +7,11 @@ Modern C++20 command-line tool for tracking and analyzing non-expired open optio
 - **Multi-account support**: Track positions across multiple IBKR accounts
 - **Automated data download**: Via IBKR Flex Web Service API
 - **Smart filtering**: Only non-expired options (expiry > current date)
-- **Strategy detection**: Auto-detect naked short puts, spreads, covered calls
-- **Risk analysis**: Breakeven, max profit/loss, distance to strike, portfolio totals
+- **Strategy detection**: Auto-detect naked short puts/calls, bull put spreads, bear call spreads, iron condors
+- **Risk analysis**: Breakeven, max profit/loss, assignment risk levels, portfolio totals
+- **Real-time prices**: Yahoo Finance integration for current price and distance-to-strike
+- **Duration buckets**: Positions grouped by expiry (1w, 2w, 3w, 3w+)
+- **JSON output**: `--format json` flag for Python/dashboard integration
 - **Manual position entry**: Add custom/what-if positions for analysis
 - **Export capabilities**: CSV export for Excel/Google Sheets
 
@@ -206,20 +209,29 @@ ibkr-options-analyzer manual-add \
 
 ### Analyze Commands
 ```bash
-# Show all open non-expired positions
+# Show all open non-expired positions (grouped by duration)
 ibkr-options-analyzer analyze open
 
-# Show risk/impact analysis
-ibkr-options-analyzer analyze impact
+# Show impact analysis for a single underlying
+ibkr-options-analyzer analyze impact --underlying AAPL
 
-# Show detected strategies
+# Show detected strategies with risk metrics
 ibkr-options-analyzer analyze strategy
 
-# Filter by account
+# Filter by account or underlying
 ibkr-options-analyzer analyze open --account "Main Account"
-
-# Filter by underlying
 ibkr-options-analyzer analyze open --underlying AAPL
+```
+
+### JSON Output (for Python integration)
+```bash
+# JSON output for all commands
+ibkr-options-analyzer --format json analyze open 2>/dev/null
+ibkr-options-analyzer --format json analyze strategy 2>/dev/null
+ibkr-options-analyzer --format json report 2>/dev/null
+
+# Suppress all human-readable output (pipe-friendly)
+ibkr-options-analyzer --format json --quiet analyze open 2>/dev/null | python3 -m json.tool
 ```
 
 ### Report Command
@@ -236,24 +248,25 @@ ibkr-options-analyzer report --account "IRA Account" --output ira_report.csv
 
 ## Understanding the Output
 
-### Open Positions Table
-```
-Account      | Symbol              | Underlying | Expiry     | Strike | Right | Qty  | Mark   | Value
--------------|---------------------|------------|------------|--------|-------|------|--------|--------
-Main Account | AAPL  250321P00150000| AAPL      | 2025-03-21 | 150.00 | P     | -1   | 2.35   | -235.00
-```
+### Open Positions (Duration Buckets)
+Positions are grouped by time to expiry:
+- **≤1 week**: Expiring within 7 days
+- **≤2 weeks**: 8-14 days to expiry
+- **≤3 weeks**: 15-21 days to expiry
+- **>3 weeks**: More than 21 days
+
+Each position shows: underlying, expiry, strike, right, quantity, entry premium, current price (if available), and distance to strike with risk indicator (ITM/near/OTM).
 
 ### Risk Analysis
 - **Breakeven**: Strike - premium collected (for short puts)
 - **Max Profit**: Premium collected (for short options)
-- **Max Loss**: Strike × 100 - premium (for naked short puts)
-- **Distance to Strike**: (Current price - Strike) / Current price × 100%
-- **Delta**: Approximate delta based on mark price (if available)
+- **Max Loss**: Strike × 100 - premium (for naked short puts); unlimited for short calls
+- **Assignment Risk Levels**: CRITICAL (ITM/≤1% OTM), HIGH (1-5%), MODERATE (5-10%), SAFE (>10%)
 
 ### Strategy Detection
-- **Naked Short Put**: Single short put, no other legs
-- **Short Put Spread**: Short put + long put (lower strike), same expiry
-- **Covered Call**: Long stock + short call
+- **Naked Short Put/Call**: Single short option
+- **Bull Put Spread**: Short put + long put (lower strike), same expiry
+- **Bear Call Spread**: Short call + long call (higher strike), same expiry
 - **Iron Condor**: Short put spread + short call spread
 
 ## Troubleshooting
@@ -286,6 +299,14 @@ Main Account | AAPL  250321P00150000| AAPL      | 2025-03-21 | 150.00 | P     | 
 - All dependencies are fetched automatically via FetchContent
 
 ## Architecture
+
+```
+CLI (main.cpp) → Commands (presentation) → Services (orchestration) → Core (db, analysis, parsers)
+```
+
+- **src/core/**: Static library (`ibkr_core`) with config, flex, parsers, db, analysis, report, utils, services
+- **src/cli/**: CLI executable with command handlers (thin wrappers)
+- **JSON output**: All commands support `--format json` for Python dashboard integration
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed component design.
 

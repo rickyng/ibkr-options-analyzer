@@ -109,16 +109,17 @@ This will:
 
 ### View Positions
 
-List all open option positions:
+List all open option positions grouped by duration:
 
 ```bash
-./build/release/ibkr-options-analyzer list
+./build/release/ibkr-options-analyzer analyze open
 ```
 
-Filter by account:
+Filter by account or underlying:
 
 ```bash
-./build/release/ibkr-options-analyzer list --account "Main Account"
+./build/release/ibkr-options-analyzer analyze open --account "Main Account"
+./build/release/ibkr-options-analyzer analyze open --underlying AAPL
 ```
 
 ### Analyze Strategies
@@ -126,15 +127,38 @@ Filter by account:
 Detect option strategies and calculate risk metrics:
 
 ```bash
+# Show all positions with risk levels
 ./build/release/ibkr-options-analyzer analyze open
+
+# Impact analysis for a specific underlying
+./build/release/ibkr-options-analyzer analyze impact --underlying AAPL
+
+# Detected strategies with risk metrics
+./build/release/ibkr-options-analyzer analyze strategy
 ```
 
 Supported strategies:
-- Short Put (cash-secured)
-- Covered Call
+- Naked Short Put / Naked Short Call
+- Bull Put Spread
+- Bear Call Spread
 - Iron Condor
-- Credit Spread
-- Naked positions
+
+### JSON Output
+
+All commands support `--format json` for structured output (Python/dashboard integration):
+
+```bash
+# JSON output
+./build/release/ibkr-options-analyzer --format json analyze open 2>/dev/null
+
+# Pipe to Python
+./build/release/ibkr-options-analyzer --format json --quiet analyze strategy 2>/dev/null | python3 -m json.tool
+
+# JSON report
+./build/release/ibkr-options-analyzer --format json report 2>/dev/null
+```
+
+In JSON mode, log messages go to stderr so stdout contains only clean JSON.
 
 ### Get Help
 
@@ -148,6 +172,8 @@ Supported strategies:
 All commands support:
 - `--config PATH`: Use custom config file
 - `--log-level LEVEL`: Set logging verbosity (`trace`, `debug`, `info`, `warn`, `error`)
+- `--format json`: Output structured JSON (for Python integration)
+- `--quiet`: Suppress human-readable output (combine with `--format json`)
 - `--help`: Show command help
 
 ## Example Workflow
@@ -314,5 +340,5 @@ For issues or questions:
 
 - Only tracks option positions (no stocks, futures, forex)
 - Requires IBKR Flex Web Service access
-- No real-time pricing (uses last known prices from IBKR)
+- Yahoo Finance prices may be unavailable for some international symbols
 - Greeks calculation not yet implemented

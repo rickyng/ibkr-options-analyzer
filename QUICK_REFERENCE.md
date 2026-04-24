@@ -94,12 +94,10 @@ ibkr-options-analyzer analyze TYPE [OPTIONS]
 - `--underlying TEXT` - Filter by underlying symbol
 
 **Analysis Types:**
-- `open` - Show all open non-expired positions with:
+- `open` - Show all open non-expired positions grouped by duration (≤1w, ≤2w, ≤3w, >3w) with:
   - Real-time stock prices (fetched from Yahoo Finance)
-  - Assignment risk indicators (⚠️ ITM, ⚡ Near strike)
-  - Consolidated portfolio summary
-  - Expiration schedule
-  - Risk metrics
+  - Assignment risk levels (CRITICAL, HIGH, MODERATE, SAFE)
+  - Consolidated portfolio summary and capital requirements
 - `impact` - Show risk/impact analysis for specific underlying
 - `strategy` - Show detected strategies (spreads, naked positions, etc.)
 
@@ -128,9 +126,20 @@ Available for all commands:
 
 | Option | Description |
 |--------|-------------|
-| `--config PATH` - Use custom config file (default: ~/.ibkr-options-analyzer/config.json)
-| `--log-level LEVEL` - Set logging level: trace, debug, info, warn, error (default: info)
-| `--help` or `-h` - Show help message
+| `--config PATH` | Use custom config file (default: ~/.ibkr-options-analyzer/config.json) |
+| `--log-level LEVEL` | Set logging level: trace, debug, info, warn, error (default: info) |
+| `--format FORMAT` | Output format: text, json (default: text) |
+| `--quiet` | Suppress human-readable output (use with --format json) |
+| `--help` or `-h` | Show help message |
+
+### JSON Output Examples
+```bash
+# Get positions as JSON
+./build/release/ibkr-options-analyzer --format json analyze open 2>/dev/null
+
+# Pipe to Python for processing
+./build/release/ibkr-options-analyzer --format json --quiet analyze strategy 2>/dev/null | python3 -m json.tool
+```
 
 ## Quick Examples
 

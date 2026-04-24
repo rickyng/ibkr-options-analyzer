@@ -1,33 +1,40 @@
 # Findings — IBKR Options Analyzer
 
-## Codebase Exploration (2026-04-23)
+## Codebase Exploration (updated 2026-04-24)
 
-### What Exists
-- **Complete CLI** with 5 commands: download, import, manual-add, analyze, report
-- **Complete database layer** (SQLite with SQLiteCpp)
-- **Complete Flex client** (HTTP + XML parsing)
-- **Complete parsers** (option symbol + CSV)
-- **Complete price fetcher** (Yahoo Finance + Alpha Vantage fallback)
-- **Complete report generator** (text + CSV export)
-- **Complete HTTP client** (cpp-httplib wrapper)
-- **Complete logging** (spdlog with rotation)
+### Current Architecture
 
-### What's Missing / Deleted
-- `src/analysis/risk_calculator.cpp/hpp` — DELETED, needs rebuild
-- `src/analysis/strategy_detector.cpp/hpp` — DELETED, needs rebuild
-- JSON output format (`--format json`) — not implemented
-- Multi-account database schema — partially there, needs FKs and consolidation queries
-- Service layer (logic is embedded in command classes)
-- Core library separation (everything in flat src/ structure)
-- Unit test framework and tests
+```
+src/core/          — Static library (libibkr_core.a)
+  config/          — ConfigManager, config loading
+  flex/            — FlexDownloader, IBKR Flex Web Service client
+  parsers/         — Option symbol parser, CSV parser
+  db/              — Database, schema, CRUD operations
+  analysis/        — StrategyDetector, RiskCalculator
+  report/          — ReportGenerator, CSVExporter
+  utils/           — Logger, HttpClient, PriceFetcher, JsonOutput, Result<T>
+  services/        — FlexService, ImportService, PositionService, PriceService,
+                     StrategyService, ReportService
+src/cli/           — CLI executable
+  main.cpp         — CLI11 setup, --format json, --quiet flags
+  commands/        — Thin wrappers delegating to services
+```
 
-### Key Observations
-1. Command classes are large (analyze_command: 7200+ lines, import_command: 7060 lines, manual_add_command: 7148 lines). Service layer extraction will reduce these significantly.
-2. The CMakeLists.txt already uses modern CMake with FetchContent and presets.
-3. Config format (config.json) already supports multiple accounts in the accounts array.
-4. Database schema already has some multi-account support but lacks proper FKs and consolidation queries.
+### Completed Phases
+
+- **Phase 1**: Core static library + CLI executable separation
+- **Phase 2**: Analysis module (StrategyDetector, RiskCalculator with multi-account support)
+- **Phase 3**: JSON output layer (--format json, --quiet, stderr logging in JSON mode)
+- **Phase 4**: Service layer extraction (6 service classes, commands are thin wrappers)
+
+### What's Still Pending
+
+- Unit test suite (Catch2)
+- CLI multi-account support (--account flag for download/import)
+- Python dashboard project (FastAPI + Dash, reads SQLite, calls CLI for writes)
 
 ### Build
-- CMake presets: debug, release (with sanitizers in debug)
+
+- CMake presets: debug (with sanitizers), release (optimized)
 - Dependencies: CLI11, fmt, spdlog, nlohmann_json, pugixml, cpp-httplib, rapidcsv, SQLiteCpp, date
-- C++20/23 standard
+- C++20 standard
