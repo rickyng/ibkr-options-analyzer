@@ -1,5 +1,5 @@
 #include "import_command.hpp"
-#include "parser/csv_parser.hpp"
+#include "parsers/csv_parser.hpp"
 #include "db/database.hpp"
 #include "utils/logger.hpp"
 #include <filesystem>

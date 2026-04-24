@@ -6,6 +6,14 @@
 
 namespace ibkr::parser {
 
+// Convert YYYYMMDD to YYYY-MM-DD format
+static std::string format_expiry_date(const std::string& yyyymmdd) {
+    if (yyyymmdd.length() == 8) {
+        return yyyymmdd.substr(0, 4) + "-" + yyyymmdd.substr(4, 2) + "-" + yyyymmdd.substr(6, 2);
+    }
+    return yyyymmdd;  // Return as-is if not 8 digits
+}
+
 using utils::Result;
 using utils::Error;
 using utils::Logger;
@@ -176,12 +184,23 @@ Result<TradeRecord> CSVParser::parse_trade_row(
     trade.net_cash = parse_double(get_column(row, "NetCash"));
     trade.asset_class = get_column(row, "AssetClass");
 
-    // Try to parse option details from symbol
+    // Try to parse option details from symbol, fall back to CSV columns
     if (OptionSymbolParser::is_option_symbol(trade.symbol)) {
         auto option_result = OptionSymbolParser::parse(trade.symbol);
         if (option_result) {
             trade.option_details = *option_result;
         }
+    }
+    if (!trade.option_details && !trade.put_call.empty()
+        && (trade.put_call[0] == 'C' || trade.put_call[0] == 'P')
+        && !trade.underlying_symbol.empty() && !trade.expiry.empty()) {
+        OptionDetails details;
+        details.underlying = trade.underlying_symbol;
+        details.expiry = format_expiry_date(trade.expiry);
+        details.strike = trade.strike;
+        details.right = trade.put_call[0];
+        details.original_symbol = trade.symbol;
+        trade.option_details = details;
     }
 
     return trade;
@@ -209,12 +228,23 @@ Result<OpenPositionRecord> CSVParser::parse_position_row(
     position.asset_class = get_column(row, "AssetClass");
     position.report_date = get_column(row, "ReportDate");
 
-    // Try to parse option details from symbol
+    // Try to parse option details from symbol, fall back to CSV columns
     if (OptionSymbolParser::is_option_symbol(position.symbol)) {
         auto option_result = OptionSymbolParser::parse(position.symbol);
         if (option_result) {
             position.option_details = *option_result;
         }
+    }
+    if (!position.option_details && !position.put_call.empty()
+        && (position.put_call[0] == 'C' || position.put_call[0] == 'P')
+        && !position.underlying_symbol.empty() && !position.expiry.empty()) {
+        OptionDetails details;
+        details.underlying = position.underlying_symbol;
+        details.expiry = format_expiry_date(position.expiry);
+        details.strike = position.strike;
+        details.right = position.put_call[0];
+        details.original_symbol = position.symbol;
+        position.option_details = details;
     }
 
     return position;

@@ -55,7 +55,7 @@ bool OptionSymbolParser::is_expired(const std::string& expiry_date) {
         ss >> date::parse("%F", ymd);
 
         if (ss.fail()) {
-            Logger::warn("Failed to parse expiry date: {}", expiry_date);
+            // Likely a header row (e.g. "Expiry", "RelatedTradeID") — not a real date
             return false;
         }
 

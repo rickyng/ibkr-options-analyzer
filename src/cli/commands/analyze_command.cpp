@@ -106,27 +106,11 @@ Result<void> AnalyzeCommand::analyze_open(
         return Result<void>{};
     }
 
-    // Group by account first (for consolidated view)
-    std::map<std::string, std::map<std::string, std::vector<Position>>> by_account_and_underlying;
-    auto db_ptr = database.get_db();
-
-    for (const auto& pos : positions) {
-        SQLite::Statement query(*db_ptr, "SELECT name FROM accounts WHERE id = ?");
-        query.bind(1, pos.account_id);
-        std::string account_name = "Unknown";
-        if (query.executeStep()) {
-            account_name = query.getColumn(0).getString();
-        }
-        by_account_and_underlying[account_name][pos.underlying].push_back(pos);
-    }
-
     // Display positions
-    std::cout << "\nOpen Positions (" << positions.size() << " total";
-    if (account_filter.empty()) {
-        std::cout << " across " << by_account_and_underlying.size() << " accounts";
-    }
-    std::cout << "):\n";
+    std::cout << "\nOpen Positions (" << positions.size() << "):\n";
     std::cout << std::string(80, '=') << "\n";
+
+    auto db_ptr = database.get_db();
 
     // Collect unique underlyings for price fetching
     std::set<std::string> unique_underlyings;
@@ -140,64 +124,114 @@ Result<void> AnalyzeCommand::analyze_open(
     std::vector<std::string> symbols(unique_underlyings.begin(), unique_underlyings.end());
     auto current_prices = price_fetcher.fetch_prices(symbols);
 
-    // Show consolidated view by account
-    for (const auto& [account_name, by_underlying] : by_account_and_underlying) {
-        std::cout << "\n[" << account_name << "]\n";
+    // Build account name lookup
+    std::map<int64_t, std::string> account_names;
+    {
+        SQLite::Statement q(*db_ptr, "SELECT id, name FROM accounts");
+        while (q.executeStep()) {
+            account_names[q.getColumn(0).getInt64()] = q.getColumn(1).getString();
+        }
+    }
+
+    // Group positions by duration bucket
+    struct Bucket {
+        std::string label;
+        int min_days;
+        int max_days;  // inclusive, -1 = no upper bound
+    };
+
+    std::vector<Bucket> buckets = {
+        {"Expiring within 1 week  (≤7 days)",   0,  7},
+        {"Expiring within 2 weeks (8-14 days)", 8, 14},
+        {"Expiring within 3 weeks (15-21 days)",15, 21},
+        {"Expiring > 3 weeks     (>21 days)",   22, -1},
+    };
+
+    // Assign positions to buckets
+    struct PosEntry {
+        Position pos;
+        int days;
+        std::string account_name;
+    };
+
+    std::vector<std::vector<PosEntry>> bucket_entries(buckets.size());
+    for (const auto& pos : positions) {
+        int days = RiskCalculator::calculate_days_to_expiry(pos.expiry);
+        std::string acct = "Unknown";
+        auto it = account_names.find(pos.account_id);
+        if (it != account_names.end()) acct = it->second;
+
+        PosEntry entry{pos, days, acct};
+        for (size_t b = 0; b < buckets.size(); ++b) {
+            if (days >= buckets[b].min_days &&
+                (buckets[b].max_days < 0 || days <= buckets[b].max_days)) {
+                bucket_entries[b].push_back(entry);
+                break;
+            }
+        }
+    }
+
+    // Display by duration bucket
+    for (size_t b = 0; b < buckets.size(); ++b) {
+        const auto& entries = bucket_entries[b];
+
+        std::cout << "\n" << std::string(80, '=') << "\n";
+        std::cout << buckets[b].label << " — " << entries.size() << " position";
+        if (entries.size() != 1) std::cout << "s";
+        std::cout << "\n";
         std::cout << std::string(80, '-') << "\n";
 
-        for (const auto& [underlying, positions_list] : by_underlying) {
-            std::cout << "\n  " << underlying << " (" << positions_list.size() << " position";
-            if (positions_list.size() != 1) std::cout << "s";
-            std::cout << ")";
+        if (entries.empty()) {
+            std::cout << "  (none)\n";
+            continue;
+        }
 
-            // Show current price if available
-            if (current_prices.count(underlying)) {
-                std::cout << " - Current: $" << std::fixed << std::setprecision(2)
-                          << current_prices[underlying].price;
+        // Sort entries: by account, then underlying, then expiry
+        std::vector<PosEntry> sorted = entries;
+        std::sort(sorted.begin(), sorted.end(),
+            [](const PosEntry& a, const PosEntry& b) {
+                if (a.account_name != b.account_name) return a.account_name < b.account_name;
+                if (a.pos.underlying != b.pos.underlying) return a.pos.underlying < b.pos.underlying;
+                return a.pos.expiry < b.pos.expiry;
+            });
+
+        std::string cur_account;
+        for (const auto& e : sorted) {
+            if (e.account_name != cur_account) {
+                std::cout << "\n  [" << e.account_name << "]\n";
+                cur_account = e.account_name;
             }
-            std::cout << ":\n";
 
-            for (const auto& pos : positions_list) {
-                int days_to_expiry = RiskCalculator::calculate_days_to_expiry(pos.expiry);
+            std::cout << "    " << e.pos.underlying << "  "
+                      << e.pos.expiry << "  $"
+                      << std::fixed << std::setprecision(2) << e.pos.strike
+                      << " " << e.pos.right << " × " << e.pos.quantity
+                      << " @ $" << e.pos.entry_premium;
 
-                std::cout << "    " << pos.expiry << " $" << std::fixed << std::setprecision(2)
-                          << pos.strike << " " << pos.right << " × " << pos.quantity
-                          << " @ $" << pos.entry_premium;
+            if (e.pos.is_manual) std::cout << " [MANUAL]";
 
-                if (pos.is_manual) {
-                    std::cout << " [MANUAL]";
-                }
-
-                std::cout << " (" << days_to_expiry << " days)";
-
-                // Calculate assignment risk if price is available
-                if (current_prices.count(underlying)) {
-                    double current_price = current_prices[underlying].price;
-                    double strike = pos.strike;
-
-                    if (pos.quantity < 0) {  // Short position
-                        if (pos.right == 'P') {
-                            // Short put: at risk if stock < strike
-                            double distance_pct = ((current_price - strike) / current_price) * 100.0;
-                            if (current_price < strike) {
-                                std::cout << " ⚠️  ITM by " << std::abs(distance_pct) << "%";
-                            } else if (distance_pct < 5.0) {
-                                std::cout << " ⚡ Near strike (" << distance_pct << "%)";
-                            }
-                        } else if (pos.right == 'C') {
-                            // Short call: at risk if stock > strike
-                            double distance_pct = ((strike - current_price) / current_price) * 100.0;
-                            if (current_price > strike) {
-                                std::cout << " ⚠️  ITM by " << std::abs(distance_pct) << "%";
-                            } else if (distance_pct < 5.0) {
-                                std::cout << " ⚡ Near strike (" << distance_pct << "%)";
-                            }
-                        }
-                    }
-                }
-
-                std::cout << "\n";
+            // Show current price
+            if (current_prices.count(e.pos.underlying)) {
+                std::cout << "  (now: $" << std::fixed << std::setprecision(2)
+                          << current_prices[e.pos.underlying].price << ")";
             }
+
+            // Assignment risk indicator
+            if (current_prices.count(e.pos.underlying) && e.pos.quantity < 0) {
+                double cp = current_prices[e.pos.underlying].price;
+                double dist = e.pos.right == 'P'
+                    ? ((cp - e.pos.strike) / cp) * 100.0
+                    : ((e.pos.strike - cp) / cp) * 100.0;
+                bool itm = (e.pos.right == 'P' && cp < e.pos.strike) ||
+                           (e.pos.right == 'C' && cp > e.pos.strike);
+                if (itm) {
+                    std::cout << " ⚠️ ITM " << std::abs(dist) << "%";
+                } else if (dist < 5.0) {
+                    std::cout << " ⚡ " << dist << "% OTM";
+                }
+            }
+
+            std::cout << "\n";
         }
     }
 

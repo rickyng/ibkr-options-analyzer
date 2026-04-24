@@ -2,7 +2,7 @@
 
 #include "schema.hpp"
 #include "utils/result.hpp"
-#include "parser/csv_parser.hpp"
+#include "parsers/csv_parser.hpp"
 #include <string>
 #include <memory>
 #include <SQLiteCpp/SQLiteCpp.h>

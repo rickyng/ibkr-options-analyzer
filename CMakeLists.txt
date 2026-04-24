@@ -106,45 +106,64 @@ FetchContent_MakeAvailable(
     date
 )
 
-# Main executable
+# Core static library: libibkr_core.a
+add_library(ibkr_core STATIC
+    src/core/config/config_manager.cpp
+    src/core/config/config_manager.hpp
+    src/core/flex/flex_downloader.cpp
+    src/core/flex/flex_downloader.hpp
+    src/core/parsers/option_symbol_parser.cpp
+    src/core/parsers/option_symbol_parser.hpp
+    src/core/parsers/csv_parser.cpp
+    src/core/parsers/csv_parser.hpp
+    src/core/db/database.cpp
+    src/core/db/database.hpp
+    src/core/db/schema.hpp
+    src/core/analysis/strategy_detector.cpp
+    src/core/analysis/strategy_detector.hpp
+    src/core/analysis/risk_calculator.cpp
+    src/core/analysis/risk_calculator.hpp
+    src/core/report/report_generator.cpp
+    src/core/report/report_generator.hpp
+    src/core/report/csv_exporter.cpp
+    src/core/report/csv_exporter.hpp
+    src/core/utils/result.hpp
+    src/core/utils/logger.cpp
+    src/core/utils/logger.hpp
+    src/core/utils/http_client.cpp
+    src/core/utils/http_client.hpp
+    src/core/utils/price_fetcher.cpp
+    src/core/utils/price_fetcher.hpp
+)
+
+target_include_directories(ibkr_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+)
+
+target_link_libraries(ibkr_core PUBLIC
+    fmt::fmt
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    pugixml::pugixml
+    httplib::httplib
+    rapidcsv
+    SQLiteCpp
+    date::date
+)
+
+# CLI executable
 add_executable(ibkr-options-analyzer
-    src/main.cpp
-    src/config/config_manager.cpp
-    src/config/config_manager.hpp
-    src/flex/flex_downloader.cpp
-    src/flex/flex_downloader.hpp
-    src/parser/option_symbol_parser.cpp
-    src/parser/option_symbol_parser.hpp
-    src/parser/csv_parser.cpp
-    src/parser/csv_parser.hpp
-    src/db/database.cpp
-    src/db/database.hpp
-    src/db/schema.hpp
-    src/analysis/strategy_detector.cpp
-    src/analysis/strategy_detector.hpp
-    src/analysis/risk_calculator.cpp
-    src/analysis/risk_calculator.hpp
-    src/report/report_generator.cpp
-    src/report/report_generator.hpp
-    src/report/csv_exporter.cpp
-    src/report/csv_exporter.hpp
-    src/commands/download_command.cpp
-    src/commands/download_command.hpp
-    src/commands/import_command.cpp
-    src/commands/import_command.hpp
-    src/commands/manual_add_command.cpp
-    src/commands/manual_add_command.hpp
-    src/commands/analyze_command.cpp
-    src/commands/analyze_command.hpp
-    src/commands/report_command.cpp
-    src/commands/report_command.hpp
-    src/utils/result.hpp
-    src/utils/logger.cpp
-    src/utils/logger.hpp
-    src/utils/http_client.cpp
-    src/utils/http_client.hpp
-    src/utils/price_fetcher.cpp
-    src/utils/price_fetcher.hpp
+    src/cli/main.cpp
+    src/cli/commands/download_command.cpp
+    src/cli/commands/download_command.hpp
+    src/cli/commands/import_command.cpp
+    src/cli/commands/import_command.hpp
+    src/cli/commands/manual_add_command.cpp
+    src/cli/commands/manual_add_command.hpp
+    src/cli/commands/analyze_command.cpp
+    src/cli/commands/analyze_command.hpp
+    src/cli/commands/report_command.cpp
+    src/cli/commands/report_command.hpp
 )
 
 # Compiler warnings — target-only to avoid propagating -Werror to dependencies
@@ -155,19 +174,12 @@ else()
 endif()
 
 target_include_directories(ibkr-options-analyzer PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/cli
 )
 
 target_link_libraries(ibkr-options-analyzer PRIVATE
+    ibkr_core
     CLI11::CLI11
-    fmt::fmt
-    spdlog::spdlog
-    nlohmann_json::nlohmann_json
-    pugixml::pugixml
-    httplib::httplib
-    rapidcsv
-    SQLiteCpp
-    date::date
 )
 
 # Workaround: Apple Clang 21 consteval bug in fmt FMT_STRING

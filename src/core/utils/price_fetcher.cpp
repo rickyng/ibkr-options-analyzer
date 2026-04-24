@@ -16,11 +16,33 @@ static const std::map<std::string, std::string> SYMBOL_MAPPING = {
     {"BRK.A", "BRK-A"}
 };
 
+// Hong Kong stocks on IBKR are numeric-only (e.g., 1299, 388, 700)
+// Yahoo Finance uses .HK suffix
 static std::string map_symbol_to_yahoo(const std::string& symbol) {
+    // Skip obvious header rows
+    if (symbol == "UnderlyingSymbol" || symbol == "Symbol" || symbol.empty()) {
+        return "";  // Invalid - will be filtered out
+    }
+
+    // Check explicit mapping first
     auto it = SYMBOL_MAPPING.find(symbol);
     if (it != SYMBOL_MAPPING.end()) {
         return it->second;
     }
+
+    // Hong Kong stocks: numeric-only symbols need .HK suffix
+    // (IBKR HK tickers are plain numbers like 1299, 388, 700)
+    bool is_numeric = !symbol.empty();
+    for (char c : symbol) {
+        if (!std::isdigit(c)) {
+            is_numeric = false;
+            break;
+        }
+    }
+    if (is_numeric && symbol.length() <= 5) {
+        return symbol + ".HK";
+    }
+
     return symbol;
 }
 
@@ -80,6 +102,11 @@ std::map<std::string, StockPrice> PriceFetcher::fetch_prices(const std::vector<s
     std::map<std::string, StockPrice> prices;
 
     for (const auto& symbol : symbols) {
+        auto yahoo_sym = map_symbol_to_yahoo(symbol);
+        if (yahoo_sym.empty()) {
+            Logger::debug("Skipping invalid symbol: {}", symbol);
+            continue;
+        }
         auto result = fetch_price(symbol);
         if (result) {
             prices[symbol] = *result;
