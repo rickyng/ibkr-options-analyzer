@@ -1,6 +1,7 @@
 #include <CLI/CLI.hpp>
 #include "config/config_manager.hpp"
 #include "utils/logger.hpp"
+#include "utils/json_output.hpp"
 #include "commands/download_command.hpp"
 #include "commands/import_command.hpp"
 #include "commands/manual_add_command.hpp"
@@ -29,10 +30,19 @@ int main(int argc, char** argv) {
     // Global options
     std::string config_path;
     std::string log_level;
+    std::string format;
+    bool quiet = false;
     app.add_option("--config", config_path, "Path to config.json")
         ->default_val("");
     app.add_option("--log-level", log_level, "Log level (trace|debug|info|warn|error)")
         ->default_val("");
+    app.add_option("--format", format, "Output format (text|json)")
+        ->default_val("text")
+        ->check([](const std::string& val) -> std::string {
+            if (val != "text" && val != "json") return "Must be 'text' or 'json'";
+            return {};
+        });
+    app.add_flag("--quiet", quiet, "Suppress human-readable output (only JSON)");
 
     // Download subcommand
     auto* download_cmd = app.add_subcommand("download", "Download Flex reports from IBKR");
@@ -94,6 +104,15 @@ int main(int argc, char** argv) {
     // Parse command line
     CLI11_PARSE(app, argc, argv);
 
+    bool json_mode = (format == "json");
+
+    // Initialize logger early with defaults so config loading logs go to stderr in JSON mode
+    ibkr::utils::Logger::init(
+        "~/.ibkr-options-analyzer/logs/app.log",
+        "info", 10, 5,
+        json_mode  // use stderr when JSON output is active
+    );
+
     // Load configuration
     auto config_result = ibkr::config::ConfigManager::load(config_path);
     if (!config_result) {
@@ -107,13 +126,15 @@ int main(int argc, char** argv) {
 
     const auto& config = *config_result;
 
-    // Initialize logger
+    // Re-initialize logger with config settings
+    ibkr::utils::Logger::shutdown();
     std::string effective_log_level = log_level.empty() ? config.logging.level : log_level;
     ibkr::utils::Logger::init(
         config.logging.file,
         effective_log_level,
         config.logging.max_file_size_mb,
-        config.logging.max_files
+        config.logging.max_files,
+        json_mode
     );
 
     ibkr::utils::Logger::info("IBKR Options Analyzer v1.0.0");
@@ -125,6 +146,11 @@ int main(int argc, char** argv) {
                                   config.database.path);
     }
 
+    // Build output options
+    ibkr::utils::OutputOptions output_opts;
+    output_opts.json = (format == "json");
+    output_opts.quiet = quiet;
+
     // Execute subcommand
     try {
         if (*download_cmd) {
@@ -133,12 +159,17 @@ int main(int argc, char** argv) {
                 download_token,
                 download_query_id,
                 download_account,
-                download_force
+                download_force,
+                output_opts
             );
 
             if (!result) {
-                ibkr::utils::Logger::error("Download failed: {}", result.error().format());
-                std::cerr << "Error: " << result.error().format() << "\n";
+                if (output_opts.json) {
+                    std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
+                } else {
+                    ibkr::utils::Logger::error("Download failed: {}", result.error().format());
+                    std::cerr << "Error: " << result.error().format() << "\n";
+                }
                 ibkr::utils::Logger::shutdown();
                 return EXIT_FAILURE;
             }
@@ -149,12 +180,17 @@ int main(int argc, char** argv) {
                 import_file,
                 "",  // account_filter (not implemented yet)
                 false,  // options_only
-                true   // clear_existing
+                true,   // clear_existing
+                output_opts
             );
 
             if (!result) {
-                ibkr::utils::Logger::error("Import failed: {}", result.error().format());
-                std::cerr << "Error: " << result.error().format() << "\n";
+                if (output_opts.json) {
+                    std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
+                } else {
+                    ibkr::utils::Logger::error("Import failed: {}", result.error().format());
+                    std::cerr << "Error: " << result.error().format() << "\n";
+                }
                 ibkr::utils::Logger::shutdown();
                 return EXIT_FAILURE;
             }
@@ -169,12 +205,17 @@ int main(int argc, char** argv) {
                 manual_right,
                 manual_quantity,
                 manual_premium,
-                manual_notes
+                manual_notes,
+                output_opts
             );
 
             if (!result) {
-                ibkr::utils::Logger::error("Manual-add failed: {}", result.error().format());
-                std::cerr << "Error: " << result.error().format() << "\n";
+                if (output_opts.json) {
+                    std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
+                } else {
+                    ibkr::utils::Logger::error("Manual-add failed: {}", result.error().format());
+                    std::cerr << "Error: " << result.error().format() << "\n";
+                }
                 ibkr::utils::Logger::shutdown();
                 return EXIT_FAILURE;
             }
@@ -184,12 +225,17 @@ int main(int argc, char** argv) {
                 config,
                 analyze_type,
                 analyze_account,
-                analyze_underlying
+                analyze_underlying,
+                output_opts
             );
 
             if (!result) {
-                ibkr::utils::Logger::error("Analyze failed: {}", result.error().format());
-                std::cerr << "Error: " << result.error().format() << "\n";
+                if (output_opts.json) {
+                    std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
+                } else {
+                    ibkr::utils::Logger::error("Analyze failed: {}", result.error().format());
+                    std::cerr << "Error: " << result.error().format() << "\n";
+                }
                 ibkr::utils::Logger::shutdown();
                 return EXIT_FAILURE;
             }
@@ -200,12 +246,17 @@ int main(int argc, char** argv) {
                 report_output,
                 report_type,
                 report_account,
-                report_underlying
+                report_underlying,
+                output_opts
             );
 
             if (!result) {
-                ibkr::utils::Logger::error("Report failed: {}", result.error().format());
-                std::cerr << "Error: " << result.error().format() << "\n";
+                if (output_opts.json) {
+                    std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
+                } else {
+                    ibkr::utils::Logger::error("Report failed: {}", result.error().format());
+                    std::cerr << "Error: " << result.error().format() << "\n";
+                }
                 ibkr::utils::Logger::shutdown();
                 return EXIT_FAILURE;
             }

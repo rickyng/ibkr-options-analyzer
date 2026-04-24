@@ -23,7 +23,8 @@ Result<void> ReportCommand::execute(
     const std::string& output_path,
     const std::string& report_type,
     const std::string& /* account_filter */,
-    const std::string& underlying_filter) {
+    const std::string& underlying_filter,
+    const utils::OutputOptions& output_opts) {
 
     Logger::info("Starting report command: type={}", report_type);
 
@@ -83,6 +84,20 @@ Result<void> ReportCommand::execute(
     } catch (const std::exception& e) {
         Logger::warn("Failed to load account names: {}", e.what());
     }
+
+    // JSON output short-circuit
+    if (output_opts.json) {
+        auto pos_result = database.get_all_positions();
+        auto risk_result = database.get_consolidated_risk();
+        auto exp_result = database.get_underlying_exposure();
+        std::cout << utils::JsonOutput::report(
+            pos_result ? *pos_result : std::vector<db::Database::PositionInfo>{},
+            risk_result ? *risk_result : std::vector<db::Database::RiskSummary>{},
+            exp_result ? *exp_result : std::vector<db::Database::ExposureInfo>{}
+        ) << "\n";
+        return Result<void>{};
+    }
+    if (output_opts.quiet) return Result<void>{};
 
     // Generate report or export CSV
     if (output_path.empty()) {

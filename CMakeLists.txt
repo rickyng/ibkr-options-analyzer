@@ -134,6 +134,8 @@ add_library(ibkr_core STATIC
     src/core/utils/http_client.hpp
     src/core/utils/price_fetcher.cpp
     src/core/utils/price_fetcher.hpp
+    src/core/utils/json_output.cpp
+    src/core/utils/json_output.hpp
 )
 
 target_include_directories(ibkr_core PUBLIC

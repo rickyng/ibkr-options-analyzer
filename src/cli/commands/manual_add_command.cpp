@@ -21,7 +21,8 @@ Result<void> ManualAddCommand::execute(
     const std::string& right,
     double quantity,
     double premium,
-    const std::string& notes) {
+    const std::string& notes,
+    const utils::OutputOptions& output_opts) {
 
     Logger::info("Starting manual-add command");
 
@@ -94,26 +95,31 @@ Result<void> ManualAddCommand::execute(
 
         insert.exec();
 
+        int64_t position_id = db_ptr->getLastInsertRowid();
         Logger::info("Manual position added successfully");
 
-        std::cout << "✓ Position added:\n";
-        std::cout << "  Account: " << account_name << "\n";
-        std::cout << "  Symbol: " << symbol << "\n";
-        std::cout << "  Underlying: " << underlying << "\n";
-        std::cout << "  Expiry: " << expiry_formatted << "\n";
-        std::cout << "  Strike: $" << strike << "\n";
-        std::cout << "  Right: " << right << "\n";
-        std::cout << "  Quantity: " << quantity << " (";
-        if (quantity < 0) {
-            std::cout << "SHORT";
-        } else {
-            std::cout << "LONG";
-        }
-        std::cout << ")\n";
-        std::cout << "  Premium: $" << premium << " per share\n";
-        std::cout << "  Contract Value: $" << (quantity * premium * 100.0) << "\n";
-        if (!notes.empty()) {
-            std::cout << "  Notes: " << notes << "\n";
+        if (output_opts.json) {
+            std::cout << utils::JsonOutput::manual_add_result(position_id, symbol, underlying) << "\n";
+        } else if (!output_opts.quiet) {
+            std::cout << "✓ Position added:\n";
+            std::cout << "  Account: " << account_name << "\n";
+            std::cout << "  Symbol: " << symbol << "\n";
+            std::cout << "  Underlying: " << underlying << "\n";
+            std::cout << "  Expiry: " << expiry_formatted << "\n";
+            std::cout << "  Strike: $" << strike << "\n";
+            std::cout << "  Right: " << right << "\n";
+            std::cout << "  Quantity: " << quantity << " (";
+            if (quantity < 0) {
+                std::cout << "SHORT";
+            } else {
+                std::cout << "LONG";
+            }
+            std::cout << ")\n";
+            std::cout << "  Premium: $" << premium << " per share\n";
+            std::cout << "  Contract Value: $" << (quantity * premium * 100.0) << "\n";
+            if (!notes.empty()) {
+                std::cout << "  Notes: " << notes << "\n";
+            }
         }
 
         return Result<void>{};

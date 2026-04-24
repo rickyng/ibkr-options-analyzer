@@ -17,7 +17,8 @@ Result<void> ImportCommand::execute(
     const std::string& file_path,
     const std::string& account_filter,
     bool options_only,
-    bool clear_existing) {
+    bool clear_existing,
+    const utils::OutputOptions& output_opts) {
 
     Logger::info("Starting import command");
 
@@ -139,12 +140,16 @@ Result<void> ImportCommand::execute(
     Logger::info("Import complete: {} files, {} trades, {} positions",
                 files_imported, total_trades, total_positions);
 
-    std::cout << "✓ Import complete:\n";
-    std::cout << "  Files imported: " << files_imported << "\n";
-    std::cout << "  Trades imported: " << total_trades << "\n";
-    std::cout << "  Open positions imported: " << total_positions << "\n";
-    std::cout << "  Total in database: " << db_trades << " trades, "
-              << db_positions << " open positions\n";
+    if (output_opts.json) {
+        std::cout << utils::JsonOutput::import_result(total_trades, total_positions, file_path) << "\n";
+    } else if (!output_opts.quiet) {
+        std::cout << "✓ Import complete:\n";
+        std::cout << "  Files imported: " << files_imported << "\n";
+        std::cout << "  Trades imported: " << total_trades << "\n";
+        std::cout << "  Open positions imported: " << total_positions << "\n";
+        std::cout << "  Total in database: " << db_trades << " trades, "
+                  << db_positions << " open positions\n";
+    }
 
     return Result<void>{};
 }

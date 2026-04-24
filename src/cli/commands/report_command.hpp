@@ -2,6 +2,7 @@
 
 #include "config/config_manager.hpp"
 #include "utils/result.hpp"
+#include "utils/json_output.hpp"
 #include <string>
 
 namespace ibkr::commands {
@@ -27,6 +28,7 @@ public:
      * @param report_type Type of report (full|positions|strategies|summary)
      * @param account_filter Optional account name filter
      * @param underlying_filter Optional underlying symbol filter
+     * @param output_opts Output format options
      * @return Result indicating success or error
      */
     static utils::Result<void> execute(
@@ -34,7 +36,8 @@ public:
         const std::string& output_path = "",
         const std::string& report_type = "full",
         const std::string& account_filter = "",
-        const std::string& underlying_filter = "");
+        const std::string& underlying_filter = "",
+        const utils::OutputOptions& output_opts = {});
 };
 
 } // namespace ibkr::commands

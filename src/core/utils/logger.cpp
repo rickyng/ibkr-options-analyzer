@@ -11,7 +11,8 @@ bool Logger::initialized_ = false;
 void Logger::init(const std::string& log_file_path,
                  const std::string& log_level,
                  size_t max_file_size_mb,
-                 size_t max_files) {
+                 size_t max_files,
+                 bool use_stderr) {
     if (initialized_) {
         return;
     }
@@ -32,8 +33,13 @@ void Logger::init(const std::string& log_file_path,
             std::filesystem::create_directories(log_path.parent_path());
         }
 
-        // Create console sink with colors
-        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        // Create console sink with colors (stdout or stderr)
+        spdlog::sink_ptr console_sink;
+        if (use_stderr) {
+            console_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        } else {
+            console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        }
         console_sink->set_level(spdlog::level::info);
         console_sink->set_pattern("[%^%l%$] %v");
 
@@ -76,8 +82,8 @@ void Logger::init(const std::string& log_file_path,
     } catch (const std::exception& e) {
         std::cerr << "Failed to initialize logger: " << e.what() << "\n";
         // Fallback to console-only logging
-        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        auto logger = std::make_shared<spdlog::logger>("ibkr", console_sink);
+        auto fallback_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        auto logger = std::make_shared<spdlog::logger>("ibkr", fallback_sink);
         spdlog::set_default_logger(logger);
         initialized_ = true;
     }

@@ -4,6 +4,7 @@
 #include "analysis/risk_calculator.hpp"
 #include "utils/logger.hpp"
 #include "utils/price_fetcher.hpp"
+#include "utils/json_output.hpp"
 #include <iostream>
 #include <iomanip>
 #include <map>
@@ -26,19 +27,20 @@ Result<void> AnalyzeCommand::execute(
     const config::Config& config,
     const std::string& analysis_type,
     const std::string& account_filter,
-    const std::string& underlying_filter) {
+    const std::string& underlying_filter,
+    const utils::OutputOptions& output_opts) {
 
     Logger::info("Starting analyze command: type={}", analysis_type);
 
     if (analysis_type == "open") {
-        return analyze_open(config, account_filter, underlying_filter);
+        return analyze_open(config, account_filter, underlying_filter, output_opts);
     } else if (analysis_type == "impact") {
         if (underlying_filter.empty()) {
             return Error{"Impact analysis requires --underlying option"};
         }
-        return analyze_impact(config, underlying_filter, account_filter);
+        return analyze_impact(config, underlying_filter, account_filter, output_opts);
     } else if (analysis_type == "strategy") {
-        return analyze_strategy(config, account_filter, underlying_filter);
+        return analyze_strategy(config, account_filter, underlying_filter, output_opts);
     } else {
         return Error{
             "Invalid analysis type",
@@ -50,7 +52,8 @@ Result<void> AnalyzeCommand::execute(
 Result<void> AnalyzeCommand::analyze_open(
     const config::Config& config,
     const std::string& account_filter,
-    const std::string& underlying_filter) {
+    const std::string& underlying_filter,
+    const utils::OutputOptions& output_opts) {
 
     Logger::info("Analyzing open positions");
 
@@ -102,13 +105,13 @@ Result<void> AnalyzeCommand::analyze_open(
     }
 
     if (positions.empty()) {
-        std::cout << "No open positions found.\n";
+        if (output_opts.json) {
+            std::cout << utils::JsonOutput::open_positions({}, {}, {}) << "\n";
+        } else {
+            std::cout << "No open positions found.\n";
+        }
         return Result<void>{};
     }
-
-    // Display positions
-    std::cout << "\nOpen Positions (" << positions.size() << "):\n";
-    std::cout << std::string(80, '=') << "\n";
 
     auto db_ptr = database.get_db();
 
@@ -132,6 +135,14 @@ Result<void> AnalyzeCommand::analyze_open(
             account_names[q.getColumn(0).getInt64()] = q.getColumn(1).getString();
         }
     }
+
+    // JSON output short-circuit
+    if (output_opts.json) {
+        std::cout << utils::JsonOutput::open_positions(positions, current_prices, account_names) << "\n";
+        return Result<void>{};
+    }
+
+    if (output_opts.quiet) return Result<void>{};
 
     // Group positions by duration bucket
     struct Bucket {
@@ -494,7 +505,8 @@ Result<void> AnalyzeCommand::analyze_open(
 Result<void> AnalyzeCommand::analyze_impact(
     const config::Config& config,
     const std::string& underlying_filter,
-    const std::string& /* account_filter */) {
+    const std::string& /* account_filter */,
+    const utils::OutputOptions& output_opts) {
 
     Logger::info("Analyzing impact for underlying: {}", underlying_filter);
 
@@ -528,9 +540,33 @@ Result<void> AnalyzeCommand::analyze_impact(
     }
 
     if (positions.empty()) {
-        std::cout << "No positions found for " << underlying_filter << "\n";
+        if (output_opts.json) {
+            std::cout << utils::JsonOutput::impact_analysis(underlying_filter, {}, {}) << "\n";
+        } else {
+            std::cout << "No positions found for " << underlying_filter << "\n";
+        }
         return Result<void>{};
     }
+
+    // Calculate risk metrics for JSON output
+    std::vector<RiskMetrics> impact_metrics;
+    for (const auto& pos : positions) {
+        Strategy temp;
+        temp.type = (pos.quantity < 0)
+            ? (pos.right == 'P' ? Strategy::Type::NakedShortPut : Strategy::Type::NakedShortCall)
+            : Strategy::Type::NakedShortPut; // placeholder for long
+        temp.legs.push_back(pos);
+        temp.underlying = pos.underlying;
+        temp.expiry = pos.expiry;
+        impact_metrics.push_back(RiskCalculator::calculate_risk(temp));
+    }
+
+    // JSON output short-circuit
+    if (output_opts.json) {
+        std::cout << utils::JsonOutput::impact_analysis(underlying_filter, positions, impact_metrics) << "\n";
+        return Result<void>{};
+    }
+    if (output_opts.quiet) return Result<void>{};
 
     std::cout << "\nImpact Analysis: " << underlying_filter << "\n";
     std::cout << std::string(80, '-') << "\n";
@@ -575,7 +611,8 @@ Result<void> AnalyzeCommand::analyze_impact(
 Result<void> AnalyzeCommand::analyze_strategy(
     const config::Config& config,
     const std::string& account_filter,
-    const std::string& underlying_filter) {
+    const std::string& underlying_filter,
+    const utils::OutputOptions& output_opts) {
 
     Logger::info("Analyzing strategies");
 
@@ -630,7 +667,11 @@ Result<void> AnalyzeCommand::analyze_strategy(
     }
 
     if (strategies.empty()) {
-        std::cout << "No strategies detected.\n";
+        if (output_opts.json) {
+            std::cout << utils::JsonOutput::strategies({}, {}, {}) << "\n";
+        } else {
+            std::cout << "No strategies detected.\n";
+        }
         return Result<void>{};
     }
 
@@ -639,6 +680,23 @@ Result<void> AnalyzeCommand::analyze_strategy(
     for (const auto& strategy : strategies) {
         all_metrics.push_back(RiskCalculator::calculate_risk(strategy));
     }
+
+    // Build account name map
+    std::map<int64_t, std::string> account_names;
+    {
+        auto db_ptr = database.get_db();
+        SQLite::Statement q(*db_ptr, "SELECT id, name FROM accounts");
+        while (q.executeStep()) {
+            account_names[q.getColumn(0).getInt64()] = q.getColumn(1).getString();
+        }
+    }
+
+    // JSON output short-circuit
+    if (output_opts.json) {
+        std::cout << utils::JsonOutput::strategies(strategies, all_metrics, account_names) << "\n";
+        return Result<void>{};
+    }
+    if (output_opts.quiet) return Result<void>{};
 
     // Group strategies by account for consolidated view
     std::map<std::string, std::vector<std::pair<const Strategy*, const RiskMetrics*>>> by_account;

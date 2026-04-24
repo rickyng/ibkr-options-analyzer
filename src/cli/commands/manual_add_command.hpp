@@ -2,6 +2,7 @@
 
 #include "config/config_manager.hpp"
 #include "utils/result.hpp"
+#include "utils/json_output.hpp"
 #include <string>
 
 namespace ibkr::commands {
@@ -34,6 +35,7 @@ public:
      * @param quantity Quantity (negative=short, positive=long)
      * @param premium Entry premium per share (e.g., 2.50)
      * @param notes Optional notes
+     * @param output_opts Output format options
      * @return Result indicating success or error
      */
     static utils::Result<void> execute(
@@ -45,7 +47,8 @@ public:
         const std::string& right,
         double quantity,
         double premium,
-        const std::string& notes = "");
+        const std::string& notes = "",
+        const utils::OutputOptions& output_opts = {});
 
 private:
     /**

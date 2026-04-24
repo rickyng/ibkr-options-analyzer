@@ -2,6 +2,7 @@
 
 #include "config/config_manager.hpp"
 #include "utils/result.hpp"
+#include "utils/json_output.hpp"
 #include <string>
 
 namespace ibkr::commands {
@@ -24,6 +25,7 @@ public:
      * @param account_filter Optional account name filter
      * @param options_only If true, only import option records
      * @param clear_existing If true, clear existing open positions before import
+     * @param output_opts Output format options
      * @return Result indicating success or error
      */
     static utils::Result<void> execute(
@@ -31,7 +33,8 @@ public:
         const std::string& file_path = "",
         const std::string& account_filter = "",
         bool options_only = false,
-        bool clear_existing = true);
+        bool clear_existing = true,
+        const utils::OutputOptions& output_opts = {});
 
 private:
     /**

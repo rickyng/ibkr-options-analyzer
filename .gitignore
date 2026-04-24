@@ -82,5 +82,5 @@ $RECYCLE.BIN/
 *~
 
 # Core dumps
-core
-core.*
+/core
+/core.*

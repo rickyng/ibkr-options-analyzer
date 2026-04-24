@@ -23,7 +23,8 @@ public:
     static void init(const std::string& log_file_path,
                     const std::string& log_level = "info",
                     size_t max_file_size_mb = 10,
-                    size_t max_files = 5);
+                    size_t max_files = 5,
+                    bool use_stderr = false);
 
     // Set log level at runtime
     static void set_level(const std::string& level);

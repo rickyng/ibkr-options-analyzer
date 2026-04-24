@@ -14,7 +14,8 @@ Result<void> DownloadCommand::execute(
     const std::string& token,
     const std::string& query_id,
     const std::string& account_name,
-    bool force) {
+    bool force,
+    const utils::OutputOptions& output_opts) {
 
     Logger::info("Starting download command for account: {}", account_name);
 
@@ -55,7 +56,12 @@ Result<void> DownloadCommand::execute(
     }
 
     Logger::info("Download complete: {}", *result);
-    std::cout << "✓ Downloaded: " << *result << "\n";
+
+    if (output_opts.json) {
+        std::cout << utils::JsonOutput::download_result(*result, account_name) << "\n";
+    } else if (!output_opts.quiet) {
+        std::cout << "✓ Downloaded: " << *result << "\n";
+    }
 
     return Result<void>{};
 }
