@@ -18,13 +18,6 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
 endif()
 
-# Compiler warnings
-if(MSVC)
-    add_compile_options(/W4 /WX)
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror)
-endif()
-
 # FetchContent for all dependencies
 include(FetchContent)
 
@@ -154,6 +147,13 @@ add_executable(ibkr-options-analyzer
     src/utils/price_fetcher.hpp
 )
 
+# Compiler warnings — target-only to avoid propagating -Werror to dependencies
+if(MSVC)
+    target_compile_options(ibkr-options-analyzer PRIVATE /W4 /WX)
+else()
+    target_compile_options(ibkr-options-analyzer PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-deprecated-literal-operator)
+endif()
+
 target_include_directories(ibkr-options-analyzer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
@@ -169,6 +169,13 @@ target_link_libraries(ibkr-options-analyzer PRIVATE
     SQLiteCpp
     date::date
 )
+
+# Workaround: Apple Clang 21 consteval bug in fmt FMT_STRING
+# Disables constexpr evaluation that triggers compiler errors
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
+    target_compile_definitions(fmt PRIVATE FMT_CONSTEVAL=)
+    target_compile_definitions(spdlog PRIVATE FMT_CONSTEVAL=)
+endif()
 
 # Installation
 install(TARGETS ibkr-options-analyzer
