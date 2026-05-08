@@ -1,0 +1,407 @@
+#include "risk_calculator.hpp"
+#include "utils/currency.hpp"
+#include "utils/logger.hpp"
+#include <date/date.h>
+#include <cmath>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+#include <algorithm>
+
+namespace ibkr::analysis {
+
+using utils::Logger;
+
+RiskMetrics RiskCalculator::calculate_risk(const Strategy& strategy) {
+    RiskMetrics metrics;
+    switch (strategy.type) {
+        case Strategy::Type::NakedShortPut:
+            metrics = calculate_naked_short_put_risk(strategy.legs[0]);
+            break;
+        case Strategy::Type::NakedShortCall:
+            metrics = calculate_naked_short_call_risk(strategy.legs[0]);
+            break;
+        case Strategy::Type::BullPutSpread:
+            metrics = calculate_bull_put_spread_risk(strategy.legs[0], strategy.legs[1]);
+            break;
+        case Strategy::Type::BearCallSpread:
+            metrics = calculate_bear_call_spread_risk(strategy.legs[0], strategy.legs[1]);
+            break;
+        case Strategy::Type::IronCondor:
+            metrics = calculate_iron_condor_risk(strategy);
+            break;
+        default:
+            Logger::warn("Unknown strategy type for risk calculation");
+            break;
+    }
+    metrics.currency = strategy.currency;
+    return metrics;
+}
+
+RiskMetrics RiskCalculator::calculate_naked_short_put_risk(const Position& pos) {
+    RiskMetrics metrics;
+
+    // Net premium received (negative quantity means short)
+    metrics.net_premium = premium_for(pos.quantity, pos.entry_premium);
+
+    // Breakeven: Strike - Premium
+    metrics.breakeven_price = pos.strike - pos.entry_premium;
+
+    // Max profit: Premium received
+    metrics.max_profit = metrics.net_premium;
+
+    // Max loss: (Strike - Premium) * 100 * |Quantity| (if stock goes to $0)
+    metrics.max_loss = (pos.strike - pos.entry_premium) * constants::CONTRACT_MULTIPLIER * std::abs(pos.quantity);
+
+    // 10% loss: stock drops 10% below strike
+    double loss_10pct_per_share = pos.strike * 0.10 - pos.entry_premium;
+    metrics.max_loss_10pct = std::max(0.0, loss_10pct_per_share) * constants::CONTRACT_MULTIPLIER * std::abs(pos.quantity);
+
+    // 20% loss: stock drops 20% below strike
+    double loss_20pct_per_share = pos.strike * 0.20 - pos.entry_premium;
+    metrics.max_loss_20pct = std::max(0.0, loss_20pct_per_share) * constants::CONTRACT_MULTIPLIER * std::abs(pos.quantity);
+
+    // Risk level: HIGH (undefined risk down to zero)
+    metrics.risk_level = RiskLevel::High;
+
+    // Days to expiry
+    metrics.days_to_expiry = calculate_days_to_expiry(pos.expiry);
+
+    return metrics;
+}
+
+RiskMetrics RiskCalculator::calculate_naked_short_call_risk(const Position& pos) {
+    RiskMetrics metrics;
+
+    // Net premium received
+    metrics.net_premium = premium_for(pos.quantity, pos.entry_premium);
+
+    // Breakeven: Strike + Premium
+    metrics.breakeven_price = pos.strike + pos.entry_premium;
+
+    // Max profit: Premium received
+    metrics.max_profit = metrics.net_premium;
+
+    // Max loss: UNLIMITED (stock can go to infinity)
+    metrics.max_loss = std::numeric_limits<double>::infinity();
+
+    // 10% loss: stock rises 10% above strike
+    double loss_10pct_per_share = pos.strike * 0.10 - pos.entry_premium;
+    metrics.max_loss_10pct = std::max(0.0, loss_10pct_per_share) * constants::CONTRACT_MULTIPLIER * std::abs(pos.quantity);
+
+    // 20% loss: stock rises 20% above strike
+    double loss_20pct_per_share = pos.strike * 0.20 - pos.entry_premium;
+    metrics.max_loss_20pct = std::max(0.0, loss_20pct_per_share) * constants::CONTRACT_MULTIPLIER * std::abs(pos.quantity);
+
+    // Risk level: HIGH (unlimited risk)
+    metrics.risk_level = RiskLevel::High;
+
+    // Days to expiry
+    metrics.days_to_expiry = calculate_days_to_expiry(pos.expiry);
+
+    return metrics;
+}
+
+RiskMetrics RiskCalculator::calculate_bull_put_spread_risk(
+    const Position& short_leg,
+    const Position& long_leg) {
+
+    RiskMetrics metrics;
+
+    // Net premium: Short premium - Long premium
+    double short_premium = premium_for(short_leg.quantity, short_leg.entry_premium);
+    double long_premium = premium_for(long_leg.quantity, long_leg.entry_premium);
+    metrics.net_premium = short_premium - long_premium;
+
+    // Breakeven: Short Strike - Net Premium per share
+    metrics.breakeven_price = short_leg.strike - (metrics.net_premium / constants::CONTRACT_MULTIPLIER);
+
+    // Max profit: Net premium received
+    metrics.max_profit = metrics.net_premium;
+
+    // Max loss: (Strike Difference - Net Premium)
+    double strike_diff = short_leg.strike - long_leg.strike;
+    metrics.max_loss = (strike_diff * constants::CONTRACT_MULTIPLIER * std::abs(short_leg.quantity)) - metrics.net_premium;
+    metrics.max_loss_10pct = metrics.max_loss;
+    metrics.max_loss_20pct = metrics.max_loss;
+
+    // Risk level: DEFINED (limited risk)
+    metrics.risk_level = RiskLevel::Defined;
+
+    // Days to expiry
+    metrics.days_to_expiry = calculate_days_to_expiry(short_leg.expiry);
+
+    return metrics;
+}
+
+RiskMetrics RiskCalculator::calculate_bear_call_spread_risk(
+    const Position& short_leg,
+    const Position& long_leg) {
+
+    RiskMetrics metrics;
+
+    // Net premium: Short premium - Long premium
+    double short_premium = premium_for(short_leg.quantity, short_leg.entry_premium);
+    double long_premium = premium_for(long_leg.quantity, long_leg.entry_premium);
+    metrics.net_premium = short_premium - long_premium;
+
+    // Breakeven: Short Strike + Net Premium per share
+    metrics.breakeven_price = short_leg.strike + (metrics.net_premium / constants::CONTRACT_MULTIPLIER);
+
+    // Max profit: Net premium received
+    metrics.max_profit = metrics.net_premium;
+
+    // Max loss: (Strike Difference - Net Premium)
+    double strike_diff = long_leg.strike - short_leg.strike;
+    metrics.max_loss = (strike_diff * constants::CONTRACT_MULTIPLIER * std::abs(short_leg.quantity)) - metrics.net_premium;
+    metrics.max_loss_10pct = metrics.max_loss;
+    metrics.max_loss_20pct = metrics.max_loss;
+
+    // Risk level: DEFINED (limited risk)
+    metrics.risk_level = RiskLevel::Defined;
+
+    // Days to expiry
+    metrics.days_to_expiry = calculate_days_to_expiry(short_leg.expiry);
+
+    return metrics;
+}
+
+RiskMetrics RiskCalculator::calculate_iron_condor_risk(const Strategy& condor) {
+    RiskMetrics metrics;
+
+    // Iron condor has 4 legs: 2 puts (bull put spread) + 2 calls (bear call spread)
+    if (condor.legs.size() != 4) {
+        Logger::error("Iron condor must have 4 legs");
+        return metrics;
+    }
+
+    // Separate puts and calls
+    std::vector<Position> puts, calls;
+    for (const auto& leg : condor.legs) {
+        if (leg.right == 'P') {
+            puts.push_back(leg);
+        } else {
+            calls.push_back(leg);
+        }
+    }
+
+    if (puts.size() != 2 || calls.size() != 2) {
+        Logger::error("Iron condor must have 2 puts and 2 calls");
+        return metrics;
+    }
+
+    // Sort by strike
+    std::sort(puts.begin(), puts.end(), [](const Position& a, const Position& b) {
+        return a.strike < b.strike;
+    });
+    std::sort(calls.begin(), calls.end(), [](const Position& a, const Position& b) {
+        return a.strike < b.strike;
+    });
+
+    // Calculate net premium from all legs
+    double total_premium = 0.0;
+    for (const auto& leg : condor.legs) {
+        if (leg.quantity < 0) {
+            total_premium += premium_for(leg.quantity, leg.entry_premium);
+        } else {
+            total_premium -= premium_for(leg.quantity, leg.entry_premium);
+        }
+    }
+    metrics.net_premium = total_premium;
+
+    // Breakeven prices (two breakevens)
+    // Put side breakeven: Short put strike - Net premium per share
+    // Call side breakeven: Short call strike + Net premium per share
+    double net_premium_per_share = metrics.net_premium / 100.0;
+
+    // Find short strikes
+    double short_put_strike = 0.0, short_call_strike = 0.0;
+    for (const auto& put : puts) {
+        if (put.quantity < 0) short_put_strike = put.strike;
+    }
+    for (const auto& call : calls) {
+        if (call.quantity < 0) short_call_strike = call.strike;
+    }
+
+    metrics.breakeven_price = short_put_strike - net_premium_per_share;
+    metrics.breakeven_price_2 = short_call_strike + net_premium_per_share;
+
+    // Max profit: Net premium received
+    metrics.max_profit = metrics.net_premium;
+
+    // Max loss: Wider spread width - Net premium
+    double put_spread_width = puts[1].strike - puts[0].strike;
+    double call_spread_width = calls[1].strike - calls[0].strike;
+    double max_spread_width = std::max(put_spread_width, call_spread_width);
+    metrics.max_loss = (max_spread_width * constants::CONTRACT_MULTIPLIER) - metrics.net_premium;
+    metrics.max_loss_10pct = metrics.max_loss;
+    metrics.max_loss_20pct = metrics.max_loss;
+
+    // Risk level: DEFINED (limited risk)
+    metrics.risk_level = RiskLevel::Defined;
+
+    // Days to expiry
+    metrics.days_to_expiry = calculate_days_to_expiry(condor.expiry);
+
+    return metrics;
+}
+
+int RiskCalculator::calculate_days_to_expiry(const std::string& expiry_date) {
+    using namespace date;
+
+    // Parse expiry date (YYYY-MM-DD)
+    std::istringstream ss(expiry_date);
+    year_month_day ymd;
+    ss >> parse("%F", ymd);
+
+    if (ss.fail() || !ymd.ok()) {
+        Logger::warn("Invalid expiry date format: '{}'", expiry_date);
+        return constants::MAX_DTE_INVALID;
+    }
+
+    // Get current date
+    auto today = floor<days>(std::chrono::system_clock::now());
+    auto expiry = sys_days{ymd};
+
+    // Calculate difference in days
+    auto diff = expiry - today;
+    return static_cast<int>(diff.count());
+}
+
+RiskCalculator::PortfolioRisk RiskCalculator::calculate_portfolio_risk(
+    const std::vector<Strategy>& strategies,
+    const std::vector<RiskMetrics>& metrics,
+    const utils::CurrencyConverter& converter) {
+
+    PortfolioRisk portfolio;
+    portfolio.total_strategies = strategies.size();
+    portfolio.base_currency = converter.get_base_currency();
+
+    for (size_t i = 0; i < metrics.size(); ++i) {
+        const auto& m = metrics[i];
+
+        // Track per-currency breakdown (raw values)
+        portfolio.max_profit_by_currency[m.currency] += m.max_profit;
+        if (std::isfinite(m.max_loss)) {
+            portfolio.max_loss_by_currency[m.currency] += m.max_loss;
+        }
+        portfolio.loss_10pct_by_currency[m.currency] += m.max_loss_10pct;
+        portfolio.loss_20pct_by_currency[m.currency] += m.max_loss_20pct;
+
+        // Convert to base currency for totals
+        double profit_converted = converter.convert(m.max_profit, m.currency);
+        portfolio.total_max_profit += profit_converted;
+
+        if (std::isfinite(m.max_loss)) {
+            double loss_converted = converter.convert(m.max_loss, m.currency);
+            portfolio.total_max_loss += loss_converted;
+        }
+
+        portfolio.total_loss_10pct += converter.convert(m.max_loss_10pct, m.currency);
+        portfolio.total_loss_20pct += converter.convert(m.max_loss_20pct, m.currency);
+
+        if (m.days_to_expiry < 7 && m.days_to_expiry >= 0) {
+            portfolio.positions_expiring_soon++;
+        }
+    }
+
+    return portfolio;
+}
+
+std::vector<RiskCalculator::AccountRisk> RiskCalculator::calculate_account_risks(
+    const std::vector<Strategy>& strategies,
+    const std::vector<RiskMetrics>& metrics,
+    const utils::CurrencyConverter& converter) {
+
+    std::map<int64_t, AccountRisk> by_account;
+
+    for (size_t i = 0; i < strategies.size() && i < metrics.size(); ++i) {
+        const auto& strategy = strategies[i];
+        const auto& m = metrics[i];
+
+        if (strategy.legs.empty()) continue;
+        int64_t acct_id = strategy.legs[0].account_id;
+
+        auto& ar = by_account[acct_id];
+        ar.account_id = acct_id;
+        ar.strategy_count++;
+
+        ar.max_profit_by_currency[m.currency] += m.max_profit;
+        if (std::isfinite(m.max_loss)) {
+            ar.max_loss_by_currency[m.currency] += m.max_loss;
+        }
+        ar.loss_10pct_by_currency[m.currency] += m.max_loss_10pct;
+        ar.loss_20pct_by_currency[m.currency] += m.max_loss_20pct;
+
+        ar.total_max_profit += converter.convert(m.max_profit, m.currency);
+        if (std::isfinite(m.max_loss)) {
+            double loss_converted = converter.convert(m.max_loss, m.currency);
+            ar.total_max_loss += loss_converted;
+        }
+        ar.total_loss_10pct += converter.convert(m.max_loss_10pct, m.currency);
+        ar.total_loss_20pct += converter.convert(m.max_loss_20pct, m.currency);
+
+        if (m.days_to_expiry < 7 && m.days_to_expiry >= 0) {
+            ar.positions_expiring_soon++;
+        }
+    }
+
+    std::vector<AccountRisk> result;
+    for (const auto& [id, ar] : by_account) {
+        result.push_back(ar);
+    }
+    return result;
+}
+
+std::vector<RiskCalculator::UnderlyingExposure> RiskCalculator::calculate_underlying_exposure(
+    const std::vector<Strategy>& strategies,
+    const std::vector<RiskMetrics>& metrics,
+    const utils::CurrencyConverter& converter) {
+
+    struct Exposure {
+        double total_max_loss{0.0};
+        double total_max_profit{0.0};
+        int position_count{0};
+        std::map<int64_t, double> account_max_loss;
+    };
+
+    std::map<std::string, Exposure> by_underlying;
+
+    for (size_t i = 0; i < strategies.size() && i < metrics.size(); ++i) {
+        const auto& strategy = strategies[i];
+        const auto& m = metrics[i];
+
+        auto& exp = by_underlying[strategy.underlying];
+        exp.total_max_profit += converter.convert(m.max_profit, m.currency);
+        exp.position_count++;
+
+        if (std::isfinite(m.max_loss)) {
+            double loss_converted = converter.convert(m.max_loss, m.currency);
+            exp.total_max_loss += loss_converted;
+
+            if (!strategy.legs.empty()) {
+                int64_t acct_id = strategy.legs[0].account_id;
+                exp.account_max_loss[acct_id] += loss_converted;
+            }
+        }
+    }
+
+    std::vector<UnderlyingExposure> result;
+    for (auto& [underlying, exp] : by_underlying) {
+        UnderlyingExposure ue;
+        ue.underlying = underlying;
+        ue.total_max_loss = exp.total_max_loss;
+        ue.total_max_profit = exp.total_max_profit;
+        ue.position_count = exp.position_count;
+
+        for (const auto& [acct_id, loss] : exp.account_max_loss) {
+            ue.by_account[std::to_string(acct_id)] = loss;
+        }
+
+        result.push_back(std::move(ue));
+    }
+
+    return result;
+}
+
+} // namespace ibkr::analysis
