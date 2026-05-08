@@ -77,6 +77,15 @@ Result<CSVParser::ParseResult> CSVParser::parse_content(
                 }
             }
 
+            // Skip duplicate header rows (IBKR Flex reports can repeat headers mid-file)
+            {
+                auto it = row_map.find("UnderlyingSymbol");
+                if (it != row_map.end() && it->second == "UnderlyingSymbol") {
+                    result.skipped_rows++;
+                    continue;
+                }
+            }
+
             // Check if this is an option row
             bool is_option = is_option_row(row_map);
 
