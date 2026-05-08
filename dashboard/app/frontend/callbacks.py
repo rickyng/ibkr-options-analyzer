@@ -360,7 +360,8 @@ def register_callbacks(app: Dash) -> None:
 
         bucket_labels = ["This Week", "Next Week", "Week 3", "Week 4", "Week 5+"]
 
-        stock_buckets: dict[str, dict[str, list[float]]] = {}
+        # Store (strike, risk_category) pairs per stock per bucket
+        stock_buckets: dict[str, dict[str, list[tuple[float, str]]]] = {}
 
         today = date.today()
         today_monday = today - timedelta(days=today.weekday())
@@ -372,6 +373,7 @@ def register_callbacks(app: Dash) -> None:
 
             underlying = pos.get("underlying", "")
             strike = pos.get("strike", 0) or 0
+            risk = pos.get("risk_category", "SAFE")
 
             if underlying not in stock_buckets:
                 stock_buckets[underlying] = {b: [] for b in bucket_labels}
@@ -385,24 +387,16 @@ def register_callbacks(app: Dash) -> None:
             elif week_offset == 3: bucket_idx = 3
             else: bucket_idx = 4
 
-            stock_buckets[underlying][bucket_labels[bucket_idx]].append(strike)
+            stock_buckets[underlying][bucket_labels[bucket_idx]].append((strike, risk))
 
         if not stock_buckets:
             return html.P("No position data", className="text-muted")
-
-        col_colors = {
-            "This Week": "#fbbf24",
-            "Next Week": "#f97316",
-            "Week 3": "#94a3b8",
-            "Week 4": "#94a3b8",
-            "Week 5+": "#22c55e",
-        }
 
         header_cells = [
             html.Th("Stock", style={"textAlign": "left", "padding": "6px 10px", "color": "#94a3b8", "fontWeight": "600"})
         ]
         for label in bucket_labels:
-            header_cells.append(html.Th(label, style={"textAlign": "center", "padding": "6px 10px", "color": col_colors[label], "fontWeight": "600"}))
+            header_cells.append(html.Th(label, style={"textAlign": "center", "padding": "6px 10px", "color": "#94a3b8", "fontWeight": "600"}))
 
         rows = []
         for idx, stock in enumerate(sorted(stock_buckets.keys())):
@@ -411,14 +405,21 @@ def register_callbacks(app: Dash) -> None:
                 html.Td(stock, style={"textAlign": "left", "padding": "6px 10px", "color": "#f8fafc", "backgroundColor": row_bg})
             ]
             for label in bucket_labels:
-                strikes = stock_buckets[stock][label]
-                if strikes:
-                    text = ", ".join(f"${s:.0f}" for s in sorted(strikes))
-                    color = col_colors[label]
+                entries = stock_buckets[stock][label]
+                if entries:
+                    parts = []
+                    for strike, risk in sorted(entries, key=lambda x: x[0]):
+                        color = RISK_COLORS.get(risk, TEXT_MUTED)
+                        parts.append(html.Span(f"${strike:.0f}", style={"color": color}))
+                    # Join with comma separator
+                    strike_spans = []
+                    for i, span in enumerate(parts):
+                        strike_spans.append(span)
+                        if i < len(parts) - 1:
+                            strike_spans.append(html.Span(", ", style={"color": "#475569"}))
+                    cells.append(html.Td(strike_spans, style={"textAlign": "center", "padding": "6px 10px", "backgroundColor": row_bg}))
                 else:
-                    text = "—"
-                    color = "#475569"
-                cells.append(html.Td(text, style={"textAlign": "center", "padding": "6px 10px", "color": color, "backgroundColor": row_bg}))
+                    cells.append(html.Td("—", style={"textAlign": "center", "padding": "6px 10px", "color": "#475569", "backgroundColor": row_bg}))
             rows.append(html.Tr(cells))
 
         return dbc.Table(
