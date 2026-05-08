@@ -31,5 +31,21 @@
     "file": "~/.ibkr-options-analyzer/logs/app.log",
     "max_file_size_mb": 10,
     "max_files": 5
+  },
+  "screener": {
+    "watchlist": ["AAPL", "MSFT", "GOOGL", "AMZN", "META"],
+    "min_iv_percentile": 30.0,
+    "min_premium_yield": 0.5,
+    "min_dte": 14,
+    "max_dte": 60,
+    "otm_buffer_percent": 5.0,
+    "allow_synthetic_options": true
+  },
+  "alpha_vantage": {
+    "api_key": "YOUR_ALPHA_VANTAGE_API_KEY",
+    "default_volatility": 0.3,
+    "risk_free_rate": 0.05,
+    "volatility_lookback_days": 100,
+    "api_call_delay_ms": 1000
   }
 }

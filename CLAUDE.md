@@ -47,10 +47,11 @@ cmake --build build/release
 ## Architecture
 
 ### Layer Structure (WAT Framework Inspired)
-1. **Commands** (`src/commands/`): CLI command handlers (thin layer)
-2. **Core Logic** (`src/flex/`, `src/parser/`, `src/analyzer/`): Business logic
-3. **Data Layer** (`src/db/`): SQLite database operations
-4. **Utilities** (`src/utils/`): Cross-cutting concerns (logging, HTTP, errors)
+1. **Commands** (`src/cli/commands/`): Thin CLI wrappers delegating to services
+2. **Services** (`src/core/services/`): Business logic, transport-agnostic (callable from CLI or API)
+3. **Core Logic** (`src/core/analysis/`, `src/core/parsers/`, `src/core/flex/`): Domain logic
+4. **Data Layer** (`src/core/db/`): SQLite database operations
+5. **Utilities** (`src/core/utils/`): Cross-cutting concerns (logging, HTTP, JSON output, errors)
 
 ### Key Design Patterns
 - **Result<T, E>** type for error handling (no exceptions in hot paths)
@@ -59,29 +60,31 @@ cmake --build build/release
 - **Separation of concerns**: parsing, business logic, and presentation are separate
 
 ### Module Responsibilities
-- `config/`: Load and validate config.json
-- `flex/`: IBKR Flex Web Service client (SendRequest → Poll → GetStatement)
-- `parser/`: Parse IBKR option symbols and CSV reports
-- `db/`: SQLite schema and CRUD operations
-- `analyzer/`: Strategy detection and risk calculations
-- `commands/`: CLI command implementations
-- `utils/`: Logger, HTTP client, Result type
+- `src/core/config/`: Load and validate config.json
+- `src/core/flex/`: IBKR Flex Web Service client (SendRequest → Poll → GetStatement)
+- `src/core/parsers/`: Parse IBKR option symbols and CSV reports
+- `src/core/db/`: SQLite schema and CRUD operations
+- `src/core/analysis/`: Strategy detection and risk calculations
+- `src/core/services/`: Business logic orchestration (FlexService, ImportService, PositionService, PriceService, PriceCacheService, StrategyService, PortfolioService, ScreenerService, ReportService)
+- `src/core/report/`: Report generation and CSV export
+- `src/core/utils/`: Logger, HTTP client, JSON output, Result type
+- `src/cli/commands/`: CLI command handlers (thin wrappers)
 
 ## Development Workflow
 
 ### Adding a New Command
-1. Create header/cpp in `src/commands/`
-2. Add command to `main.cpp` CLI11 setup
-3. Implement command logic (delegate to core modules)
+1. Create header/cpp in `src/cli/commands/`
+2. Add command to `src/cli/main.cpp` CLI11 setup
+3. Delegate to existing service in `src/core/services/` (or create new service if needed)
 4. Update CMakeLists.txt with new files
 
 ### Adding a New Strategy Detector
-1. Add strategy type enum in `src/analyzer/strategy_detector.hpp`
+1. Add strategy type enum in `src/core/analysis/strategy_detector.hpp`
 2. Implement detection rules in `strategy_detector.cpp`
-3. Add risk calculation logic in `risk_calculator.cpp`
+3. Add risk calculation logic in `src/core/analysis/risk_calculator.cpp`
 
 ### Database Schema Changes
-1. Update `src/db/schema.hpp` with new CREATE TABLE statements
+1. Update `src/core/db/schema.hpp` with new CREATE TABLE statements
 2. Increment schema version in metadata table
 3. Add migration logic in `database.cpp` (future)
 
@@ -161,24 +164,49 @@ cmake --build build/debug --target test
 ## Security
 
 ### Sensitive Data
-- NEVER commit `config.json` (contains Flex tokens)
-- Set file permissions: `chmod 600 ~/.ibkr-options-analyzer/config.json`
+- NEVER commit `config.json` (may contain Flex tokens in legacy format)
+- Credentials provided via CLI args (not stored in config file)
 - Tokens are tied to IP address (may need regeneration)
 
 ### SQL Injection Prevention
 - Always use parameterized queries via SQLiteCpp
 - Never concatenate user input into SQL strings
 
+## Implemented Features
+
+### Dashboard (Phase 5)
+- Web dashboard with Dash/Plotly frontend at `dashboard/`
+- Account management UI with DB storage
+- Positions tab: expiry timeline chart + table, exposure table, risk distribution
+- Portfolio tab: assignment risk alerts, position details, loss scenarios, expiration calendar
+- Screener tab: put-selling opportunity scanner with parameter overrides and cache-only mode
+- Run: `cd dashboard && uvicorn app.main:app --reload --port 8001`
+
+### Analysis Services (Phase 5-6)
+- Option chain fetching via Yahoo Finance v7/v8 API
+- Synthetic option chain generation using Black-Scholes (when Yahoo blocked)
+- ScreenerService: watchlist-based opportunity screening with grading
+- PortfolioService: consolidated portfolio view construction
+- Multi-currency support with automatic symbol-to-currency deduction
+- Screener parameter overrides via CLI flags (--min-iv-percentile, --min-premium-yield, --min-dte, --max-dte, --otm-buffer)
+- Cache-only mode (--cache-only) for screener re-runs without API fetches
+
+### Price/Option Caching (Phase 7)
+- PriceCacheService: SQLite-backed caching for prices, volatility, and option chains
+- Trading-day-based TTL: cached data valid for current trading day only
+- Automatic expired cache cleanup on PriceService startup
+- US market holiday awareness (2025-2027) for trading date calculation
+- Cache tables: cached_prices, cached_volatility, cached_option_chains (schema v1.1.0)
+
 ## Future Enhancements
 
-### Phase 7+ (Not Yet Implemented)
-- Black-Scholes Greeks calculation
+### Not Yet Implemented
+- Black-Scholes Greeks calculation (delta, gamma, theta, vega)
 - TWS API integration for live prices
-- Web dashboard (HTTP server + React frontend)
 - Email/Slack alerts for risk thresholds
 - Backtesting framework
-- Multi-currency support
 - Tax reporting (wash sales, P&L)
+- Unit test framework
 
 ## Resources
 
