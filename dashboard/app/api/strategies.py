@@ -11,7 +11,7 @@ def list_strategies(account: str | None = Query(None)):
         SELECT ds.*, a.name as account_name
         FROM detected_strategies ds
         JOIN accounts a ON a.id = ds.account_id
-        WHERE date(ds.expiry) > date('now')
+        WHERE date(ds.expiry) >= date('now')
     """
     params: list[str] = []
     if account:

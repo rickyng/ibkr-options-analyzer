@@ -11,7 +11,7 @@ def list_underlyings(account: str | None = Query(None)):
         SELECT DISTINCT oo.underlying
         FROM open_options oo
         JOIN accounts a ON a.id = oo.account_id
-        WHERE date(oo.expiry) > date('now')
+        WHERE date(oo.expiry) >= date('now')
     """
     params: list[str] = []
     if account:
@@ -28,7 +28,7 @@ def list_positions(account: str | None = Query(None), underlying: str | None = Q
         SELECT oo.*, a.name as account_name
         FROM open_options oo
         JOIN accounts a ON a.id = oo.account_id
-        WHERE date(oo.expiry) > date('now')
+        WHERE date(oo.expiry) >= date('now')
     """
     params: list[str] = []
     if account:
@@ -48,7 +48,7 @@ def count_positions(account: str | None = Query(None)):
         SELECT COUNT(*) as count
         FROM open_options oo
         JOIN accounts a ON a.id = oo.account_id
-        WHERE date(oo.expiry) > date('now')
+        WHERE date(oo.expiry) >= date('now')
     """
     params: list[str] = []
     if account:
