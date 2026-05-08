@@ -9,6 +9,8 @@
 #include "utils/logger.hpp"
 #include "utils/json_output.hpp"
 #include "utils/currency.hpp"
+#include <date/date.h>
+#include <chrono>
 #include <iostream>
 #include <iomanip>
 #include <map>
@@ -106,18 +108,13 @@ Result<void> AnalyzeCommand::analyze_open(
 
     // --- Human-readable output ---
 
-    // Duration bucket grouping
-    struct Bucket { std::string label; int min_days; int max_days; };
-    std::vector<Bucket> buckets = {
-        {"< 7 days",      0,  6},
-        {"7-14 days",     7, 14},
-        {"14-21 days",   15, 21},
-        {"21-28 days",   22, 28},
-        {"> 28 days",    29, -1},
+    // Calendar week bucket grouping
+    const std::vector<std::string> week_labels = {
+        "This Week", "Next Week", "Week 3", "Week 4", "Week 5+"
     };
 
-    struct PosEntry { Position pos; int days; std::string account_name; };
-    std::vector<std::vector<PosEntry>> bucket_entries(buckets.size());
+    struct PosEntry { Position pos; int days; std::string account_name; int week_offset; };
+    std::vector<std::vector<PosEntry>> bucket_entries(week_labels.size());
 
     for (const auto& pos : positions) {
         int days = RiskCalculator::calculate_days_to_expiry(pos.expiry);
@@ -125,20 +122,36 @@ Result<void> AnalyzeCommand::analyze_open(
         auto it = account_names.find(pos.account_id);
         if (it != account_names.end()) acct = it->second;
 
-        for (size_t b = 0; b < buckets.size(); ++b) {
-            if (days >= buckets[b].min_days &&
-                (buckets[b].max_days < 0 || days <= buckets[b].max_days)) {
-                bucket_entries[b].push_back({pos, days, acct});
-                break;
+        // Compute calendar week offset
+        int woff = -1;
+        if (days >= 0) {
+            using namespace date;
+            std::istringstream ss(pos.expiry);
+            year_month_day ymd;
+            ss >> parse("%F", ymd);
+            if (!ss.fail() && ymd.ok()) {
+                auto today = floor<std::chrono::days>(std::chrono::system_clock::now());
+                auto expiry_day = sys_days{ymd};
+                auto today_monday = sys_days{today} - (weekday{today} - Monday);
+                auto expiry_monday = expiry_day - (weekday{expiry_day} - Monday);
+                woff = static_cast<int>((expiry_monday - today_monday).count() / 7);
             }
         }
+
+        size_t b = 4; // default: Week 5+
+        if (woff <= 0) b = 0;
+        else if (woff == 1) b = 1;
+        else if (woff == 2) b = 2;
+        else if (woff == 3) b = 3;
+
+        bucket_entries[b].push_back({pos, days, acct, woff});
     }
 
-    // Display by duration bucket
-    for (size_t b = 0; b < buckets.size(); ++b) {
+    // Display by calendar week bucket
+    for (size_t b = 0; b < week_labels.size(); ++b) {
         const auto& entries = bucket_entries[b];
         std::cout << "\n" << std::string(80, '=') << "\n";
-        std::cout << buckets[b].label << " — " << entries.size() << " position";
+        std::cout << week_labels[b] << " — " << entries.size() << " position";
         if (entries.size() != 1) std::cout << "s";
         std::cout << "\n" << std::string(80, '-') << "\n";
 
@@ -655,8 +668,9 @@ Result<void> AnalyzeCommand::analyze_portfolio(
     std::cout << std::string(80, '=') << "\n";
 
     std::vector<std::pair<std::string, std::string>> bucket_order = {
-        {"<=7", "Expiring (<=7 days)"}, {"8-30", "Near-term (8-30 days)"},
-        {"31-60", "Medium (31-60 days)"}, {"60+", "Far (60+ days)"}
+        {"W1", "This Week"}, {"W2", "Next Week"},
+        {"W3", "Week 3"}, {"W4", "Week 4"},
+        {"W5+", "Week 5+"}
     };
     for (const auto& [key, label] : bucket_order) {
         int count = view.dte_buckets.count(key) ? view.dte_buckets[key] : 0;

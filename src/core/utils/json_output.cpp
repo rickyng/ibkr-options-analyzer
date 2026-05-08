@@ -1,12 +1,37 @@
 #include "json_output.hpp"
 #include "services/portfolio_service.hpp"
 #include "services/screener_service.hpp"
+#include <date/date.h>
+#include <chrono>
 #include <cmath>
 #include <sstream>
 
 namespace ibkr::utils {
 
 using json = nlohmann::json;
+
+// Calendar week offset from current week (0 = this week, 1 = next week, etc.)
+static int calendar_week_offset(const std::string& expiry_str) {
+    using namespace date;
+    std::istringstream ss(expiry_str);
+    year_month_day ymd;
+    ss >> parse("%F", ymd);
+    if (ss.fail() || !ymd.ok()) return -1;
+
+    auto today = floor<std::chrono::days>(std::chrono::system_clock::now());
+    auto expiry_day = sys_days{ymd};
+    auto today_monday = sys_days{today} - (weekday{today} - Monday);
+    auto expiry_monday = expiry_day - (weekday{expiry_day} - Monday);
+    return static_cast<int>((expiry_monday - today_monday).count() / 7);
+}
+
+static std::string week_bucket(int offset) {
+    if (offset <= 0) return "W1";
+    if (offset == 1) return "W2";
+    if (offset == 2) return "W3";
+    if (offset == 3) return "W4";
+    return "W5+";
+}
 
 // --- Command-level responses ---
 
@@ -80,12 +105,8 @@ json JsonOutput::position_to_json(
     j["currency"] = pos.currency;
     j["days_to_expiry"] = analysis::RiskCalculator::calculate_days_to_expiry(pos.expiry);
 
-    // Duration bucket
-    int dte = j["days_to_expiry"].get<int>();
-    if (dte >= 0 && dte <= 7) j["duration_bucket"] = "1w";
-    else if (dte <= 14) j["duration_bucket"] = "2w";
-    else if (dte <= 21) j["duration_bucket"] = "3w";
-    else j["duration_bucket"] = "3w+";
+    // Duration bucket (calendar weeks)
+    j["duration_bucket"] = week_bucket(calendar_week_offset(pos.expiry));
 
     if (current_price) {
         j["current_price"] = current_price->price;
@@ -187,7 +208,7 @@ json JsonOutput::open_positions(
     // Positions grouped by duration bucket
     json buckets = json::object();
     std::map<std::string, std::vector<json>> bucket_map = {
-        {"1w", {}}, {"2w", {}}, {"3w", {}}, {"3w+", {}}
+        {"W1", {}}, {"W2", {}}, {"W3", {}}, {"W4", {}}, {"W5+", {}}
     };
 
     for (const auto& pos : positions) {
@@ -201,11 +222,7 @@ json JsonOutput::open_positions(
 
         auto pos_j = position_to_json(pos, acct, price);
 
-        int dte = analysis::RiskCalculator::calculate_days_to_expiry(pos.expiry);
-        if (dte >= 0 && dte <= 7) bucket_map["1w"].push_back(pos_j);
-        else if (dte <= 14) bucket_map["2w"].push_back(pos_j);
-        else if (dte <= 21) bucket_map["3w"].push_back(pos_j);
-        else bucket_map["3w+"].push_back(pos_j);
+        bucket_map[week_bucket(calendar_week_offset(pos.expiry))].push_back(pos_j);
     }
 
     for (auto& [key, arr] : bucket_map) {

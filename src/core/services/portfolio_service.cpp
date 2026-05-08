@@ -2,8 +2,10 @@
 #include "analysis/risk_calculator.hpp"
 #include "utils/logger.hpp"
 #include "utils/currency.hpp"
+#include <date/date.h>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 
 namespace ibkr::services {
 
@@ -76,14 +78,28 @@ PortfolioView PortfolioService::build_portfolio_view(
 
         view.total_unrealized_pnl += pp.pnl;
 
-        // DTE buckets
+        // Calendar week buckets (ISO week offset from current week)
         if (dte >= 0) {
-            std::string bucket;
-            if (dte <= 7) bucket = "<=7";
-            else if (dte <= 30) bucket = "8-30";
-            else if (dte <= 60) bucket = "31-60";
-            else bucket = "60+";
-            view.dte_buckets[bucket]++;
+            using namespace date;
+            std::istringstream ss(pos.expiry);
+            year_month_day ymd;
+            ss >> parse("%F", ymd);
+            if (!ss.fail() && ymd.ok()) {
+                auto today = floor<days>(std::chrono::system_clock::now());
+                auto today_wd = weekday{today};
+                auto expiry_day = sys_days{ymd};
+                auto expiry_wd = weekday{expiry_day};
+                auto today_monday = sys_days{today} - (today_wd - Monday);
+                auto expiry_monday = expiry_day - (expiry_wd - Monday);
+                int week_offset = (expiry_monday - today_monday).count() / 7;
+                std::string bucket;
+                if (week_offset <= 0) bucket = "W1";
+                else if (week_offset == 1) bucket = "W2";
+                else if (week_offset == 2) bucket = "W3";
+                else if (week_offset == 3) bucket = "W4";
+                else bucket = "W5+";
+                view.dte_buckets[bucket]++;
+            }
         }
 
         // 10%/20% loss per account

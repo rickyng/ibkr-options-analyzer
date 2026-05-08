@@ -1,7 +1,7 @@
 """Dash callbacks for IBKR Options Dashboard."""
 
 from collections import defaultdict, Counter
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import plotly.graph_objects as go
 from dash import Dash, Output, Input, State, html, no_update
@@ -287,27 +287,29 @@ def register_callbacks(app: Dash) -> None:
         Input("filtered-positions-data", "data"),
     )
     def update_expiry_chart(positions):
-        """Create stacked bar chart of positions grouped by days-to-expiry buckets."""
+        """Create stacked bar chart of positions grouped by calendar week buckets."""
         if not positions:
             return go.Figure()
 
-        # Define DTE buckets
-        bucket_labels = ["<7 days", "7-14 days", "14-21 days", "21-28 days", ">28 days"]
-        bucket_ranges = [(0, 7), (7, 14), (14, 21), (21, 28), (28, 999)]
+        # Calendar week buckets (ISO week offset from current week)
+        bucket_labels = ["This Week", "Next Week", "Week 3", "Week 4", "Week 5+"]
         bucket_risks: dict[str, Counter] = {label: Counter() for label in bucket_labels}
+
+        today = date.today()
+        today_monday = today - timedelta(days=today.weekday())
 
         for pos in positions:
             expiry_date = _parse_expiry(pos.get("expiry", ""))
             if not expiry_date:
                 continue
-            days_to_expiry = (expiry_date - date.today()).days
+            expiry_monday = expiry_date - timedelta(days=expiry_date.weekday())
+            week_offset = (expiry_monday - today_monday).days // 7
 
-            # Find appropriate bucket
-            bucket_idx = 0
-            for i, (low, high) in enumerate(bucket_ranges):
-                if low <= days_to_expiry < high:
-                    bucket_idx = i
-                    break
+            if week_offset <= 0: bucket_idx = 0
+            elif week_offset == 1: bucket_idx = 1
+            elif week_offset == 2: bucket_idx = 2
+            elif week_offset == 3: bucket_idx = 3
+            else: bucket_idx = 4
 
             risk = pos.get("risk_category", "SAFE")
             bucket_risks[bucket_labels[bucket_idx]][risk] += 1
@@ -328,7 +330,7 @@ def register_callbacks(app: Dash) -> None:
 
         fig.update_layout(
             barmode="stack",
-            xaxis_title="Days to Expiry",
+            xaxis_title="Calendar Week",
             yaxis_title="Positions",
             paper_bgcolor=BG_CARD,
             plot_bgcolor=BG_CARD,
@@ -352,20 +354,21 @@ def register_callbacks(app: Dash) -> None:
         Input("filtered-positions-data", "data"),
     )
     def update_expiry_stock_table(positions):
-        """Create table of positions grouped by stock across DTE buckets."""
+        """Create table of positions grouped by stock across calendar week buckets."""
         if not positions:
             return html.P("No position data", className="text-muted")
 
-        bucket_labels = ["<7d", "7-14d", "14-21d", "21-28d", ">28d"]
-        bucket_ranges = [(0, 7), (7, 14), (14, 21), (21, 28), (28, 999)]
+        bucket_labels = ["This Week", "Next Week", "Week 3", "Week 4", "Week 5+"]
 
         stock_buckets: dict[str, dict[str, list[float]]] = {}
+
+        today = date.today()
+        today_monday = today - timedelta(days=today.weekday())
 
         for pos in positions:
             expiry_date = _parse_expiry(pos.get("expiry", ""))
             if not expiry_date:
                 continue
-            days_to_expiry = (expiry_date - date.today()).days
 
             underlying = pos.get("underlying", "")
             strike = pos.get("strike", 0) or 0
@@ -373,20 +376,26 @@ def register_callbacks(app: Dash) -> None:
             if underlying not in stock_buckets:
                 stock_buckets[underlying] = {b: [] for b in bucket_labels}
 
-            for i, (low, high) in enumerate(bucket_ranges):
-                if low <= days_to_expiry < high:
-                    stock_buckets[underlying][bucket_labels[i]].append(strike)
-                    break
+            expiry_monday = expiry_date - timedelta(days=expiry_date.weekday())
+            week_offset = (expiry_monday - today_monday).days // 7
+
+            if week_offset <= 0: bucket_idx = 0
+            elif week_offset == 1: bucket_idx = 1
+            elif week_offset == 2: bucket_idx = 2
+            elif week_offset == 3: bucket_idx = 3
+            else: bucket_idx = 4
+
+            stock_buckets[underlying][bucket_labels[bucket_idx]].append(strike)
 
         if not stock_buckets:
             return html.P("No position data", className="text-muted")
 
         col_colors = {
-            "<7d": "#fbbf24",
-            "7-14d": "#f97316",
-            "14-21d": "#94a3b8",
-            "21-28d": "#94a3b8",
-            ">28d": "#22c55e",
+            "This Week": "#fbbf24",
+            "Next Week": "#f97316",
+            "Week 3": "#94a3b8",
+            "Week 4": "#94a3b8",
+            "Week 5+": "#22c55e",
         }
 
         header_cells = [
@@ -1031,10 +1040,11 @@ def register_callbacks(app: Dash) -> None:
             return html.P("No positions", className="text-muted")
 
         bucket_info = [
-            ("<=7", "Expiring (<=7 days)", RISK_COLORS["CRITICAL"]),
-            ("8-30", "Near-term (8-30 days)", RISK_COLORS["HIGH"]),
-            ("31-60", "Medium (31-60 days)", RISK_COLORS["MODERATE"]),
-            ("60+", "Far (60+ days)", RISK_COLORS["SAFE"]),
+            ("W1", "Week 1 (0-7 days)", RISK_COLORS["CRITICAL"]),
+            ("W2", "Week 2 (8-14 days)", RISK_COLORS["HIGH"]),
+            ("W3", "Week 3 (15-21 days)", RISK_COLORS["MODERATE"]),
+            ("W4", "Week 4 (22-28 days)", RISK_COLORS["MODERATE"]),
+            ("W5+", "Week 5+ (29+ days)", RISK_COLORS["SAFE"]),
         ]
 
         blocks = []
