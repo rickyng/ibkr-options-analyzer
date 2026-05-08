@@ -2,6 +2,7 @@
 
 #include "config/config_manager.hpp"
 #include "utils/result.hpp"
+#include "utils/json_output.hpp"
 #include <string>
 
 namespace ibkr::commands {
@@ -23,6 +24,7 @@ public:
      * @param query_id IBKR Flex query ID
      * @param account_name Account name for this download
      * @param force Force re-download (skip cache)
+     * @param output_opts Output format options
      * @return Result indicating success or error
      */
     static utils::Result<void> execute(
@@ -30,7 +32,8 @@ public:
         const std::string& token,
         const std::string& query_id,
         const std::string& account_name,
-        bool force = false);
+        bool force = false,
+        const utils::OutputOptions& output_opts = {});
 };
 
 } // namespace ibkr::commands

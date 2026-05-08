@@ -1,9 +1,9 @@
 #include <CLI/CLI.hpp>
 #include "config/config_manager.hpp"
 #include "utils/logger.hpp"
+#include "utils/json_output.hpp"
 #include "commands/download_command.hpp"
 #include "commands/import_command.hpp"
-#include "commands/manual_add_command.hpp"
 #include "commands/analyze_command.hpp"
 #include "commands/report_command.hpp"
 #include <iostream>
@@ -17,7 +17,6 @@
  * Command structure:
  *   ibkr-options-analyzer download [--account NAME] [--force]
  *   ibkr-options-analyzer import [--file PATH]
- *   ibkr-options-analyzer manual-add --underlying SYM --expiry YYYYMMDD --strike N --right C/P --quantity N --premium N
  *   ibkr-options-analyzer analyze [open|impact|strategy] [--account NAME] [--underlying SYM]
  *   ibkr-options-analyzer report [--output PATH] [--account NAME]
  */
@@ -29,10 +28,19 @@ int main(int argc, char** argv) {
     // Global options
     std::string config_path;
     std::string log_level;
+    std::string format;
+    bool quiet = false;
     app.add_option("--config", config_path, "Path to config.json")
         ->default_val("");
     app.add_option("--log-level", log_level, "Log level (trace|debug|info|warn|error)")
         ->default_val("");
+    app.add_option("--format", format, "Output format (text|json)")
+        ->default_val("text")
+        ->check([](const std::string& val) -> std::string {
+            if (val != "text" && val != "json") return "Must be 'text' or 'json'";
+            return {};
+        });
+    app.add_flag("--quiet", quiet, "Suppress human-readable output (only JSON)");
 
     // Download subcommand
     auto* download_cmd = app.add_subcommand("download", "Download Flex reports from IBKR");
@@ -50,34 +58,26 @@ int main(int argc, char** argv) {
     std::string import_file;
     import_cmd->add_option("--file", import_file, "Import specific CSV file");
 
-    // Manual-add subcommand
-    auto* manual_cmd = app.add_subcommand("manual-add", "Manually add a position");
-    std::string manual_account;
-    std::string manual_underlying;
-    std::string manual_expiry;
-    double manual_strike = 0.0;
-    std::string manual_right;
-    double manual_quantity = 0.0;
-    double manual_premium = 0.0;
-    std::string manual_notes;
-
-    manual_cmd->add_option("--account", manual_account, "Account name")->required();
-    manual_cmd->add_option("--underlying", manual_underlying, "Underlying symbol (e.g., AAPL)")->required();
-    manual_cmd->add_option("--expiry", manual_expiry, "Expiry date (YYYYMMDD)")->required();
-    manual_cmd->add_option("--strike", manual_strike, "Strike price")->required();
-    manual_cmd->add_option("--right", manual_right, "Option right (C or P)")->required();
-    manual_cmd->add_option("--quantity", manual_quantity, "Quantity (negative=short, positive=long)")->required();
-    manual_cmd->add_option("--premium", manual_premium, "Entry premium per share")->required();
-    manual_cmd->add_option("--notes", manual_notes, "Optional notes");
-
     // Analyze subcommand
     auto* analyze_cmd = app.add_subcommand("analyze", "Analyze positions");
     std::string analyze_type;
     std::string analyze_account;
     std::string analyze_underlying;
-    analyze_cmd->add_option("type", analyze_type, "Analysis type (open|impact|strategy)")->required();
+    bool analyze_cache_only = false;
+    double analyze_min_iv_percentile = -1;
+    double analyze_min_premium_yield = -1;
+    int analyze_min_dte = -1;
+    int analyze_max_dte = -1;
+    double analyze_otm_buffer = -1;
+    analyze_cmd->add_option("type", analyze_type, "Analysis type (open|impact|strategy|portfolio|screener)")->required();
     analyze_cmd->add_option("--account", analyze_account, "Filter by account");
     analyze_cmd->add_option("--underlying", analyze_underlying, "Filter by underlying");
+    analyze_cmd->add_flag("--cache-only", analyze_cache_only, "Use cached data only (no API fetch, screener only)");
+    analyze_cmd->add_option("--min-iv-percentile", analyze_min_iv_percentile, "Override screener min_iv_percentile")->check(CLI::Range(0.0, 100.0));
+    analyze_cmd->add_option("--min-premium-yield", analyze_min_premium_yield, "Override screener min_premium_yield")->check(CLI::PositiveNumber);
+    analyze_cmd->add_option("--min-dte", analyze_min_dte, "Override screener min_dte")->check(CLI::PositiveNumber);
+    analyze_cmd->add_option("--max-dte", analyze_max_dte, "Override screener max_dte")->check(CLI::PositiveNumber);
+    analyze_cmd->add_option("--otm-buffer", analyze_otm_buffer, "Override screener otm_buffer_percent")->check(CLI::NonNegativeNumber);
 
     // Report subcommand
     auto* report_cmd = app.add_subcommand("report", "Generate comprehensive report");
@@ -94,6 +94,15 @@ int main(int argc, char** argv) {
     // Parse command line
     CLI11_PARSE(app, argc, argv);
 
+    bool json_mode = (format == "json");
+
+    // Initialize logger early with defaults so config loading logs go to stderr in JSON mode
+    ibkr::utils::Logger::init(
+        "~/.ibkr-options-analyzer/logs/app.log",
+        "info", 10, 5,
+        json_mode  // use stderr when JSON output is active
+    );
+
     // Load configuration
     auto config_result = ibkr::config::ConfigManager::load(config_path);
     if (!config_result) {
@@ -107,18 +116,30 @@ int main(int argc, char** argv) {
 
     const auto& config = *config_result;
 
-    // Initialize logger
+    // Re-initialize logger with config settings
+    ibkr::utils::Logger::shutdown();
     std::string effective_log_level = log_level.empty() ? config.logging.level : log_level;
     ibkr::utils::Logger::init(
         config.logging.file,
         effective_log_level,
         config.logging.max_file_size_mb,
-        config.logging.max_files
+        config.logging.max_files,
+        json_mode
     );
 
     ibkr::utils::Logger::info("IBKR Options Analyzer v1.0.0");
-    ibkr::utils::Logger::debug("Config loaded: {} accounts, database: {}",
-                              config.accounts.size(), config.database.path);
+    if (!config.accounts.empty()) {
+        ibkr::utils::Logger::debug("Config loaded: {} accounts, database: {}",
+                                  config.accounts.size(), config.database.path);
+    } else {
+        ibkr::utils::Logger::debug("Config loaded: no accounts configured (using command-line args), database: {}",
+                                  config.database.path);
+    }
+
+    // Build output options
+    ibkr::utils::OutputOptions output_opts;
+    output_opts.json = (format == "json");
+    output_opts.quiet = quiet;
 
     // Execute subcommand
     try {
@@ -128,12 +149,17 @@ int main(int argc, char** argv) {
                 download_token,
                 download_query_id,
                 download_account,
-                download_force
+                download_force,
+                output_opts
             );
 
             if (!result) {
-                ibkr::utils::Logger::error("Download failed: {}", result.error().format());
-                std::cerr << "Error: " << result.error().format() << "\n";
+                if (output_opts.json) {
+                    std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
+                } else {
+                    ibkr::utils::Logger::error("Download failed: {}", result.error().format());
+                    std::cerr << "Error: " << result.error().format() << "\n";
+                }
                 ibkr::utils::Logger::shutdown();
                 return EXIT_FAILURE;
             }
@@ -144,47 +170,46 @@ int main(int argc, char** argv) {
                 import_file,
                 "",  // account_filter (not implemented yet)
                 false,  // options_only
-                true   // clear_existing
+                true,   // clear_existing
+                output_opts
             );
 
             if (!result) {
-                ibkr::utils::Logger::error("Import failed: {}", result.error().format());
-                std::cerr << "Error: " << result.error().format() << "\n";
-                ibkr::utils::Logger::shutdown();
-                return EXIT_FAILURE;
-            }
-
-        } else if (*manual_cmd) {
-            auto result = ibkr::commands::ManualAddCommand::execute(
-                config,
-                manual_account,
-                manual_underlying,
-                manual_expiry,
-                manual_strike,
-                manual_right,
-                manual_quantity,
-                manual_premium,
-                manual_notes
-            );
-
-            if (!result) {
-                ibkr::utils::Logger::error("Manual-add failed: {}", result.error().format());
-                std::cerr << "Error: " << result.error().format() << "\n";
+                if (output_opts.json) {
+                    std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
+                } else {
+                    ibkr::utils::Logger::error("Import failed: {}", result.error().format());
+                    std::cerr << "Error: " << result.error().format() << "\n";
+                }
                 ibkr::utils::Logger::shutdown();
                 return EXIT_FAILURE;
             }
 
         } else if (*analyze_cmd) {
+            ibkr::commands::ScreenerOverrides screener_overrides;
+            screener_overrides.min_iv_percentile = analyze_min_iv_percentile;
+            screener_overrides.min_premium_yield = analyze_min_premium_yield;
+            screener_overrides.min_dte = analyze_min_dte;
+            screener_overrides.max_dte = analyze_max_dte;
+            screener_overrides.otm_buffer_percent = analyze_otm_buffer;
+
             auto result = ibkr::commands::AnalyzeCommand::execute(
                 config,
                 analyze_type,
                 analyze_account,
-                analyze_underlying
+                analyze_underlying,
+                output_opts,
+                analyze_cache_only,
+                screener_overrides
             );
 
             if (!result) {
-                ibkr::utils::Logger::error("Analyze failed: {}", result.error().format());
-                std::cerr << "Error: " << result.error().format() << "\n";
+                if (output_opts.json) {
+                    std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
+                } else {
+                    ibkr::utils::Logger::error("Analyze failed: {}", result.error().format());
+                    std::cerr << "Error: " << result.error().format() << "\n";
+                }
                 ibkr::utils::Logger::shutdown();
                 return EXIT_FAILURE;
             }
@@ -195,12 +220,17 @@ int main(int argc, char** argv) {
                 report_output,
                 report_type,
                 report_account,
-                report_underlying
+                report_underlying,
+                output_opts
             );
 
             if (!result) {
-                ibkr::utils::Logger::error("Report failed: {}", result.error().format());
-                std::cerr << "Error: " << result.error().format() << "\n";
+                if (output_opts.json) {
+                    std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
+                } else {
+                    ibkr::utils::Logger::error("Report failed: {}", result.error().format());
+                    std::cerr << "Error: " << result.error().format() << "\n";
+                }
                 ibkr::utils::Logger::shutdown();
                 return EXIT_FAILURE;
             }
