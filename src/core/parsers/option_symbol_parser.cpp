@@ -67,8 +67,8 @@ bool OptionSymbolParser::is_expired(const std::string& expiry_date) {
         auto now = std::chrono::system_clock::now();
         auto today = date::year_month_day{date::floor<date::days>(now)};
 
-        // Option is expired if expiry <= today
-        return date::sys_days{ymd} <= date::sys_days{today};
+        // Option is expired if expiry < today (expiring today = still open)
+        return date::sys_days{ymd} < date::sys_days{today};
 
     } catch (const std::exception& e) {
         Logger::warn("Exception checking expiry: {}", e.what());
