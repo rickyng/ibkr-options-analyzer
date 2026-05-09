@@ -532,4 +532,340 @@ Result<std::vector<Database::ExposureInfo>> Database::get_underlying_exposure() 
     }
 }
 
+// --- Round Trip CRUD ---
+
+Result<int64_t> Database::insert_round_trip(const RoundTrip& round_trip) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "INSERT INTO round_trips "
+            "(account_id, underlying, strike, right, expiry, quantity, "
+            "open_date, close_date, holding_days, open_price, close_price, "
+            "net_premium, commission, realized_pnl, close_reason, match_method, "
+            "strategy_type, strategy_group_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        q.bind(1, round_trip.account_id);
+        q.bind(2, round_trip.underlying);
+        q.bind(3, round_trip.strike);
+        q.bind(4, std::string(1, round_trip.right));
+        q.bind(5, round_trip.expiry);
+        q.bind(6, round_trip.quantity);
+        q.bind(7, round_trip.open_date);
+        q.bind(8, round_trip.close_date);
+        q.bind(9, round_trip.holding_days);
+        q.bind(10, round_trip.open_price);
+        q.bind(11, round_trip.close_price);
+        q.bind(12, round_trip.net_premium);
+        q.bind(13, round_trip.commission);
+        q.bind(14, round_trip.realized_pnl);
+        q.bind(15, round_trip.close_reason);
+        q.bind(16, round_trip.match_method);
+        if (round_trip.strategy_type.empty()) {
+            q.bind(17);
+        } else {
+            q.bind(17, round_trip.strategy_type);
+        }
+        if (round_trip.strategy_group_id.has_value()) {
+            q.bind(18, *round_trip.strategy_group_id);
+        } else {
+            q.bind(18);
+        }
+        q.exec();
+        int64_t id = db_->getLastInsertRowid();
+        Logger::debug("Inserted round_trip id={} for account_id={}", id, round_trip.account_id);
+        return id;
+    } catch (const std::exception& e) {
+        return Error{"Failed to insert round trip", std::string(e.what())};
+    }
+}
+
+Result<void> Database::insert_round_trip_leg(const RoundTripLeg& leg) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "INSERT INTO round_trip_legs (round_trip_id, trade_id, role, matched_quantity) "
+            "VALUES (?, ?, ?, ?)");
+        q.bind(1, leg.round_trip_id);
+        q.bind(2, leg.trade_id);
+        q.bind(3, leg.role);
+        q.bind(4, leg.matched_quantity);
+        q.exec();
+        Logger::debug("Inserted round_trip_leg for round_trip_id={}", leg.round_trip_id);
+        return Result<void>{};
+    } catch (const std::exception& e) {
+        return Error{"Failed to insert round trip leg", std::string(e.what())};
+    }
+}
+
+Result<std::vector<Database::RoundTrip>> Database::get_round_trips(
+    int64_t account_id,
+    const std::string& date_from,
+    const std::string& date_to,
+    const std::string& strategy_type,
+    const std::string& underlying) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        std::string sql =
+            "SELECT id, account_id, underlying, strike, right, expiry, quantity, "
+            "open_date, close_date, holding_days, open_price, close_price, "
+            "net_premium, commission, realized_pnl, close_reason, match_method, "
+            "strategy_type, strategy_group_id "
+            "FROM round_trips WHERE 1=1";
+
+        if (account_id > 0) sql += " AND account_id = ?";
+        if (!date_from.empty()) sql += " AND close_date >= ?";
+        if (!date_to.empty()) sql += " AND close_date <= ?";
+        if (!strategy_type.empty()) sql += " AND strategy_type = ?";
+        if (!underlying.empty()) sql += " AND underlying = ?";
+        sql += " ORDER BY close_date DESC";
+
+        SQLite::Statement q(*db_, sql);
+        int idx = 1;
+        if (account_id > 0) q.bind(idx++, account_id);
+        if (!date_from.empty()) q.bind(idx++, date_from);
+        if (!date_to.empty()) q.bind(idx++, date_to);
+        if (!strategy_type.empty()) q.bind(idx++, strategy_type);
+        if (!underlying.empty()) q.bind(idx++, underlying);
+
+        std::vector<RoundTrip> result;
+        while (q.executeStep()) {
+            RoundTrip rt;
+            rt.id = q.getColumn(0).getInt64();
+            rt.account_id = q.getColumn(1).getInt64();
+            rt.underlying = q.getColumn(2).getString();
+            rt.strike = q.getColumn(3).getDouble();
+            std::string right_str = q.getColumn(4).getString();
+            rt.right = right_str.empty() ? ' ' : right_str[0];
+            rt.expiry = q.getColumn(5).getString();
+            rt.quantity = q.getColumn(6).getInt();
+            rt.open_date = q.getColumn(7).getString();
+            rt.close_date = q.getColumn(8).getString();
+            rt.holding_days = q.getColumn(9).getInt();
+            rt.open_price = q.getColumn(10).getDouble();
+            rt.close_price = q.getColumn(11).getDouble();
+            rt.net_premium = q.getColumn(12).getDouble();
+            rt.commission = q.getColumn(13).getDouble();
+            rt.realized_pnl = q.getColumn(14).getDouble();
+            rt.close_reason = q.getColumn(15).getString();
+            rt.match_method = q.getColumn(16).getString();
+            auto strategy_type_col = q.getColumn(17);
+            if (!strategy_type_col.isNull()) {
+                rt.strategy_type = strategy_type_col.getString();
+            }
+            auto sg_col = q.getColumn(18);
+            if (!sg_col.isNull()) {
+                rt.strategy_group_id = sg_col.getInt64();
+            }
+            result.push_back(rt);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        return Error{"Failed to get round trips", std::string(e.what())};
+    }
+}
+
+Result<int> Database::get_round_trips_count(int64_t account_id) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        std::string sql = "SELECT COUNT(*) FROM round_trips";
+        if (account_id > 0) sql += " WHERE account_id = ?";
+        SQLite::Statement q(*db_, sql);
+        if (account_id > 0) q.bind(1, account_id);
+        if (q.executeStep()) {
+            return q.getColumn(0).getInt();
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        return Error{"Failed to get round trips count", std::string(e.what())};
+    }
+}
+
+Result<void> Database::clear_round_trips(int64_t account_id) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Transaction transaction(*db_);
+
+        // Delete legs first (referential integrity)
+        if (account_id > 0) {
+            SQLite::Statement del_legs(*db_,
+                "DELETE FROM round_trip_legs WHERE round_trip_id IN "
+                "(SELECT id FROM round_trips WHERE account_id = ?)");
+            del_legs.bind(1, account_id);
+            del_legs.exec();
+
+            SQLite::Statement del_rts(*db_,
+                "DELETE FROM round_trips WHERE account_id = ?");
+            del_rts.bind(1, account_id);
+            del_rts.exec();
+
+            Logger::info("Cleared round trips for account_id={}", account_id);
+        } else {
+            db_->exec("DELETE FROM round_trip_legs");
+            db_->exec("DELETE FROM round_trips");
+            Logger::info("Cleared all round trips");
+        }
+
+        transaction.commit();
+        return Result<void>{};
+    } catch (const std::exception& e) {
+        return Error{"Failed to clear round trips", std::string(e.what())};
+    }
+}
+
+// --- Strategy Round Trip CRUD ---
+
+Result<int64_t> Database::insert_strategy_round_trip(const StrategyRoundTrip& srt) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "INSERT INTO strategy_round_trips "
+            "(account_id, strategy_type, underlying, expiry, open_date, close_date, "
+            "net_premium, realized_pnl, leg_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        q.bind(1, srt.account_id);
+        q.bind(2, srt.strategy_type);
+        q.bind(3, srt.underlying);
+        q.bind(4, srt.expiry);
+        q.bind(5, srt.open_date);
+        q.bind(6, srt.close_date);
+        q.bind(7, srt.net_premium);
+        q.bind(8, srt.realized_pnl);
+        q.bind(9, srt.leg_count);
+        q.exec();
+        int64_t id = db_->getLastInsertRowid();
+        Logger::debug("Inserted strategy_round_trip id={} for account_id={}", id, srt.account_id);
+        return id;
+    } catch (const std::exception& e) {
+        return Error{"Failed to insert strategy round trip", std::string(e.what())};
+    }
+}
+
+Result<void> Database::link_round_trip_to_strategy(int64_t round_trip_id, int64_t strategy_group_id) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "UPDATE round_trips SET strategy_group_id = ? WHERE id = ?");
+        q.bind(1, strategy_group_id);
+        q.bind(2, round_trip_id);
+        int rows = q.exec();
+        if (rows == 0) return Error{"Round trip not found"};
+        Logger::debug("Linked round_trip id={} to strategy_group_id={}", round_trip_id, strategy_group_id);
+        return Result<void>{};
+    } catch (const std::exception& e) {
+        return Error{"Failed to link round trip to strategy", std::string(e.what())};
+    }
+}
+
+// --- Position Snapshot CRUD ---
+
+Result<void> Database::insert_position_snapshot(const PositionSnapshot& snapshot) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "INSERT OR REPLACE INTO position_snapshots "
+            "(account_id, snapshot_date, symbol, underlying, expiry, strike, "
+            "right, quantity, mark_price, entry_price) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        q.bind(1, snapshot.account_id);
+        q.bind(2, snapshot.snapshot_date);
+        q.bind(3, snapshot.symbol);
+        q.bind(4, snapshot.underlying);
+        q.bind(5, snapshot.expiry);
+        q.bind(6, snapshot.strike);
+        q.bind(7, std::string(1, snapshot.right));
+        q.bind(8, snapshot.quantity);
+        q.bind(9, snapshot.mark_price);
+        q.bind(10, snapshot.entry_price);
+        q.exec();
+        Logger::debug("Inserted position snapshot for account_id={} date={} symbol={}",
+                       snapshot.account_id, snapshot.snapshot_date, snapshot.symbol);
+        return Result<void>{};
+    } catch (const std::exception& e) {
+        return Error{"Failed to insert position snapshot", std::string(e.what())};
+    }
+}
+
+Result<std::vector<Database::PositionSnapshot>> Database::get_position_snapshots(
+    int64_t account_id,
+    const std::string& snapshot_date) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "SELECT id, account_id, snapshot_date, symbol, underlying, expiry, "
+            "strike, right, quantity, mark_price, entry_price "
+            "FROM position_snapshots "
+            "WHERE account_id = ? AND snapshot_date = ? "
+            "ORDER BY underlying, expiry, strike");
+        q.bind(1, account_id);
+        q.bind(2, snapshot_date);
+
+        std::vector<PositionSnapshot> result;
+        while (q.executeStep()) {
+            PositionSnapshot s;
+            s.id = q.getColumn(0).getInt64();
+            s.account_id = q.getColumn(1).getInt64();
+            s.snapshot_date = q.getColumn(2).getString();
+            s.symbol = q.getColumn(3).getString();
+            s.underlying = q.getColumn(4).getString();
+            s.expiry = q.getColumn(5).getString();
+            s.strike = q.getColumn(6).getDouble();
+            std::string right_str = q.getColumn(7).getString();
+            s.right = right_str.empty() ? ' ' : right_str[0];
+            s.quantity = q.getColumn(8).getInt();
+            s.mark_price = q.getColumn(9).getDouble();
+            s.entry_price = q.getColumn(10).getDouble();
+            result.push_back(s);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        return Error{"Failed to get position snapshots", std::string(e.what())};
+    }
+}
+
+Result<std::vector<Database::PositionSnapshot>> Database::diff_snapshots(
+    int64_t account_id,
+    const std::string& date1,
+    const std::string& date2) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        // Find positions present in date1 but not in date2 (closed between snapshots)
+        SQLite::Statement q(*db_,
+            "SELECT id, account_id, snapshot_date, symbol, underlying, expiry, "
+            "strike, right, quantity, mark_price, entry_price "
+            "FROM position_snapshots "
+            "WHERE account_id = ? AND snapshot_date = ? "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM position_snapshots ps2 "
+            "  WHERE ps2.account_id = ? AND ps2.snapshot_date = ? "
+            "  AND ps2.symbol = position_snapshots.symbol"
+            ") "
+            "ORDER BY underlying, expiry, strike");
+        q.bind(1, account_id);
+        q.bind(2, date1);
+        q.bind(3, account_id);
+        q.bind(4, date2);
+
+        std::vector<PositionSnapshot> result;
+        while (q.executeStep()) {
+            PositionSnapshot s;
+            s.id = q.getColumn(0).getInt64();
+            s.account_id = q.getColumn(1).getInt64();
+            s.snapshot_date = q.getColumn(2).getString();
+            s.symbol = q.getColumn(3).getString();
+            s.underlying = q.getColumn(4).getString();
+            s.expiry = q.getColumn(5).getString();
+            s.strike = q.getColumn(6).getDouble();
+            std::string right_str = q.getColumn(7).getString();
+            s.right = right_str.empty() ? ' ' : right_str[0];
+            s.quantity = q.getColumn(8).getInt();
+            s.mark_price = q.getColumn(9).getDouble();
+            s.entry_price = q.getColumn(10).getDouble();
+            result.push_back(s);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        return Error{"Failed to diff snapshots", std::string(e.what())};
+    }
+}
+
 } // namespace ibkr::db

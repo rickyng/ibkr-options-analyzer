@@ -21,7 +21,7 @@ namespace ibkr::db {
  * INTEGER storing cents would be needed.
  */
 
-constexpr const char* SCHEMA_VERSION = "1.1.0";
+constexpr const char* SCHEMA_VERSION = "1.2.0";
 
 // Accounts table: stores IBKR account information
 constexpr const char* CREATE_ACCOUNTS_TABLE = R"(
@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS metadata (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '1.1.0');
+INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '1.2.0');
 )";
 
 // Cache table: cached stock prices
@@ -178,6 +178,99 @@ CREATE INDEX IF NOT EXISTS idx_option_chains_symbol ON cached_option_chains(symb
 CREATE INDEX IF NOT EXISTS idx_option_chains_trading_date ON cached_option_chains(trading_date);
 )";
 
+// RoundTrips table: completed open→close cycles
+constexpr const char* CREATE_ROUND_TRIPS_TABLE = R"(
+CREATE TABLE IF NOT EXISTS round_trips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    underlying TEXT NOT NULL,
+    strike REAL NOT NULL,
+    right TEXT NOT NULL CHECK(right IN ('C', 'P')),
+    expiry TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    open_date TEXT NOT NULL,
+    close_date TEXT NOT NULL,
+    holding_days INTEGER NOT NULL,
+    open_price REAL NOT NULL,
+    close_price REAL NOT NULL,
+    net_premium REAL NOT NULL,
+    commission REAL NOT NULL DEFAULT 0.0,
+    realized_pnl REAL NOT NULL,
+    close_reason TEXT NOT NULL CHECK(close_reason IN ('closed', 'expired', 'assigned', 'rolled', 'exercised')),
+    match_method TEXT NOT NULL CHECK(match_method IN ('trade_match', 'snapshot', 'manual')),
+    strategy_type TEXT,
+    strategy_group_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY (strategy_group_id) REFERENCES strategy_round_trips(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_round_trips_account ON round_trips(account_id);
+CREATE INDEX IF NOT EXISTS idx_round_trips_underlying ON round_trips(underlying);
+CREATE INDEX IF NOT EXISTS idx_round_trips_close_date ON round_trips(close_date);
+CREATE INDEX IF NOT EXISTS idx_round_trips_strategy_type ON round_trips(strategy_type);
+)";
+
+// RoundTripLegs table: links round_trips back to source trades
+constexpr const char* CREATE_ROUND_TRIP_LEGS_TABLE = R"(
+CREATE TABLE IF NOT EXISTS round_trip_legs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    round_trip_id INTEGER NOT NULL,
+    trade_id INTEGER NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('open', 'close', 'adjust', 'partial')),
+    matched_quantity INTEGER NOT NULL,
+    FOREIGN KEY (round_trip_id) REFERENCES round_trips(id) ON DELETE CASCADE,
+    FOREIGN KEY (trade_id) REFERENCES trades(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_round_trip_legs_round_trip ON round_trip_legs(round_trip_id);
+CREATE INDEX IF NOT EXISTS idx_round_trip_legs_trade ON round_trip_legs(trade_id);
+)";
+
+// StrategyRoundTrips table: groups multi-leg round-trips
+constexpr const char* CREATE_STRATEGY_ROUND_TRIPS_TABLE = R"(
+CREATE TABLE IF NOT EXISTS strategy_round_trips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    strategy_type TEXT NOT NULL,
+    underlying TEXT NOT NULL,
+    expiry TEXT NOT NULL,
+    open_date TEXT NOT NULL,
+    close_date TEXT NOT NULL,
+    net_premium REAL NOT NULL,
+    realized_pnl REAL NOT NULL,
+    leg_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_round_trips_account ON strategy_round_trips(account_id);
+)";
+
+// PositionSnapshots table: daily position state for snapshot matching
+constexpr const char* CREATE_POSITION_SNAPSHOTS_TABLE = R"(
+CREATE TABLE IF NOT EXISTS position_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    underlying TEXT NOT NULL,
+    expiry TEXT NOT NULL,
+    strike REAL NOT NULL,
+    right TEXT NOT NULL CHECK(right IN ('C', 'P')),
+    quantity INTEGER NOT NULL,
+    mark_price REAL,
+    entry_price REAL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    UNIQUE(account_id, snapshot_date, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_position_snapshots_account_date ON position_snapshots(account_id, snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_position_snapshots_date ON position_snapshots(snapshot_date);
+)";
+
 // All schema statements in order
 constexpr const char* ALL_SCHEMA_STATEMENTS[] = {
     CREATE_ACCOUNTS_TABLE,
@@ -188,7 +281,11 @@ constexpr const char* ALL_SCHEMA_STATEMENTS[] = {
     CREATE_METADATA_TABLE,
     CREATE_CACHED_PRICES_TABLE,
     CREATE_CACHED_VOLATILITY_TABLE,
-    CREATE_CACHED_OPTION_CHAINS_TABLE
+    CREATE_CACHED_OPTION_CHAINS_TABLE,
+    CREATE_ROUND_TRIPS_TABLE,
+    CREATE_ROUND_TRIP_LEGS_TABLE,
+    CREATE_STRATEGY_ROUND_TRIPS_TABLE,
+    CREATE_POSITION_SNAPSHOTS_TABLE
 };
 
 constexpr size_t SCHEMA_STATEMENT_COUNT = sizeof(ALL_SCHEMA_STATEMENTS) / sizeof(ALL_SCHEMA_STATEMENTS[0]);

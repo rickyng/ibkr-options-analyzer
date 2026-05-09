@@ -6,6 +6,7 @@
 #include "analysis/strategy_detector.hpp"
 #include <string>
 #include <memory>
+#include <optional>
 #include <SQLiteCpp/SQLiteCpp.h>
 
 namespace ibkr::db {
@@ -131,6 +132,91 @@ public:
     };
 
     [[nodiscard]] utils::Result<std::vector<ExposureInfo>> get_underlying_exposure();
+
+    // --- Round Trip Structures ---
+
+    struct RoundTrip {
+        int64_t id{0};
+        int64_t account_id{0};
+        std::string underlying;
+        double strike{0.0};
+        char right{'P'};
+        std::string expiry;
+        int quantity{0};
+        std::string open_date;
+        std::string close_date;
+        int holding_days{0};
+        double open_price{0.0};
+        double close_price{0.0};
+        double net_premium{0.0};
+        double commission{0.0};
+        double realized_pnl{0.0};
+        std::string close_reason;
+        std::string match_method;
+        std::string strategy_type;
+        std::optional<int64_t> strategy_group_id;
+    };
+
+    struct RoundTripLeg {
+        int64_t id{0};
+        int64_t round_trip_id{0};
+        int64_t trade_id{0};
+        std::string role;
+        int matched_quantity{0};
+    };
+
+    struct StrategyRoundTrip {
+        int64_t id{0};
+        int64_t account_id{0};
+        std::string strategy_type;
+        std::string underlying;
+        std::string expiry;
+        std::string open_date;
+        std::string close_date;
+        double net_premium{0.0};
+        double realized_pnl{0.0};
+        int leg_count{0};
+    };
+
+    struct PositionSnapshot {
+        int64_t id{0};
+        int64_t account_id{0};
+        std::string snapshot_date;
+        std::string symbol;
+        std::string underlying;
+        std::string expiry;
+        double strike{0.0};
+        char right{'P'};
+        int quantity{0};
+        double mark_price{0.0};
+        double entry_price{0.0};
+    };
+
+    // --- Round Trip CRUD ---
+    [[nodiscard]] utils::Result<int64_t> insert_round_trip(const RoundTrip& round_trip);
+    [[nodiscard]] utils::Result<void> insert_round_trip_leg(const RoundTripLeg& leg);
+    [[nodiscard]] utils::Result<std::vector<RoundTrip>> get_round_trips(
+        int64_t account_id = 0,
+        const std::string& date_from = "",
+        const std::string& date_to = "",
+        const std::string& strategy_type = "",
+        const std::string& underlying = "");
+    [[nodiscard]] utils::Result<int> get_round_trips_count(int64_t account_id = 0);
+    [[nodiscard]] utils::Result<void> clear_round_trips(int64_t account_id = 0);
+
+    // --- Strategy Round Trip CRUD ---
+    [[nodiscard]] utils::Result<int64_t> insert_strategy_round_trip(const StrategyRoundTrip& srt);
+    [[nodiscard]] utils::Result<void> link_round_trip_to_strategy(int64_t round_trip_id, int64_t strategy_group_id);
+
+    // --- Position Snapshot CRUD ---
+    [[nodiscard]] utils::Result<void> insert_position_snapshot(const PositionSnapshot& snapshot);
+    [[nodiscard]] utils::Result<std::vector<PositionSnapshot>> get_position_snapshots(
+        int64_t account_id,
+        const std::string& snapshot_date);
+    [[nodiscard]] utils::Result<std::vector<PositionSnapshot>> diff_snapshots(
+        int64_t account_id,
+        const std::string& date1,
+        const std::string& date2);
 
     /**
      * Check if database is initialized.
