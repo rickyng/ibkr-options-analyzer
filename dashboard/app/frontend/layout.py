@@ -315,6 +315,200 @@ def _portfolio_tab() -> dbc.Tab:
     )
 
 
+def _trade_review_tab() -> dbc.Tab:
+    """Trade review tab for round-trip analytics."""
+    return dbc.Tab(
+        label="Trade Review",
+        tab_id="tab-trade-review",
+        children=[
+            # Filters row
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dcc.Dropdown(
+                            id="tr-account-filter",
+                            placeholder="All Accounts",
+                            clearable=True,
+                            style={"width": "200px", "backgroundColor": BG_PRIMARY},
+                        ),
+                        width="auto",
+                    ),
+                    dbc.Col(
+                        dcc.DatePickerRange(
+                            id="tr-date-range",
+                            start_date_placeholder_text="Start",
+                            end_date_placeholder_text="End",
+                            style={"backgroundColor": BG_PRIMARY, "color": "#f8fafc"},
+                            clearable=True,
+                        ),
+                        width="auto",
+                    ),
+                    dbc.Col(
+                        dbc.Button("Rebuild Round-Trips", id="tr-rebuild-btn", color="warning", outline=True, size="sm"),
+                        width="auto",
+                        className="d-flex align-items-center",
+                    ),
+                    dbc.Col(
+                        html.Span(id="tr-status", className="ms-2", style={"color": TEXT_MUTED, "fontSize": "0.85rem"}),
+                        width="auto",
+                        className="d-flex align-items-center",
+                    ),
+                ],
+                className="mb-3 g-2 align-items-center",
+            ),
+
+            # Overview KPI cards
+            dbc.Row(
+                [
+                    dbc.Col(_summary_card("Total Trades", "tr-card-total"), width=2),
+                    dbc.Col(_summary_card("Win Rate", "tr-card-win-rate"), width=2),
+                    dbc.Col(_summary_card("Net P&L", "tr-card-pnl"), width=2),
+                    dbc.Col(_summary_card("Profit Factor", "tr-card-profit-factor"), width=2),
+                    dbc.Col(_summary_card("Avg ROC", "tr-card-avg-roc"), width=2),
+                    dbc.Col(_summary_card("Expectancy", "tr-card-expectancy"), width=2),
+                ],
+                className="mb-4 justify-content-center",
+            ),
+
+            # Sub-tabs: Trades, Strategy Analysis, Loss Review
+            dbc.Tabs(
+                id="trade-subtabs",
+                children=[
+                    dbc.Tab(label="Trades", tab_id="subtab-trades"),
+                    dbc.Tab(label="Strategy Analysis", tab_id="subtab-strategy"),
+                    dbc.Tab(label="Loss Review", tab_id="subtab-loss"),
+                ],
+                active_tab="subtab-trades",
+                className="mb-3",
+            ),
+
+            # Sub-tab content containers
+            html.Div(
+                id="tr-subtab-trades",
+                children=[
+                    dash_table.DataTable(
+                        id="tr-trades-table",
+                        columns=[
+                            {"name": "Account", "id": "account"},
+                            {"name": "Underlying", "id": "underlying"},
+                            {"name": "Strike", "id": "strike", "type": "numeric"},
+                            {"name": "Right", "id": "right"},
+                            {"name": "Expiry", "id": "expiry"},
+                            {"name": "Qty", "id": "quantity", "type": "numeric"},
+                            {"name": "Open", "id": "open_date"},
+                            {"name": "Close", "id": "close_date"},
+                            {"name": "Days", "id": "holding_days", "type": "numeric"},
+                            {"name": "Premium", "id": "net_premium", "type": "numeric"},
+                            {"name": "P&L", "id": "realized_pnl", "type": "numeric"},
+                            {"name": "Comm", "id": "commission", "type": "numeric"},
+                            {"name": "ROC%", "id": "roc", "type": "numeric"},
+                            {"name": "Ann%", "id": "annualized_return", "type": "numeric"},
+                            {"name": "Reason", "id": "close_reason"},
+                            {"name": "Strategy", "id": "strategy_type"},
+                        ],
+                        data=[],
+                        sort_action="native",
+                        sort_by=[{"column_id": "close_date", "direction": "desc"}],
+                        style_header={
+                            "backgroundColor": BG_CARD,
+                            "color": "#f8fafc",
+                            "fontWeight": "bold",
+                            "border": "1px solid #334155",
+                        },
+                        style_cell={
+                            "backgroundColor": BG_CARD,
+                            "color": "#f8fafc",
+                            "border": "1px solid #334155",
+                            "textAlign": "center",
+                        },
+                        style_cell_conditional=[
+                            {"if": {"column_id": "account"}, "textAlign": "left"},
+                            {"if": {"column_id": "underlying"}, "textAlign": "left"},
+                        ],
+                        style_data_conditional=[
+                            {"if": {"row_index": "odd"}, "backgroundColor": "#253449"},
+                        ],
+                        page_size=25,
+                        css=[{"selector": ".dash-spreadsheet", "rule": "font-family: monospace"}],
+                    ),
+                ],
+            ),
+
+            html.Div(
+                id="tr-subtab-strategy",
+                style={"display": "none"},
+                children=[
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        [
+                                            html.H5("Strategy Performance", className="mb-3", style={"color": "#f8fafc"}),
+                                            html.Div(id="tr-strategy-table"),
+                                        ]
+                                    ),
+                                    style={"backgroundColor": BG_CARD, "border": "none"},
+                                ),
+                                md=6,
+                            ),
+                            dbc.Col(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        [
+                                            html.H5("DTE Breakdown", className="mb-3", style={"color": "#f8fafc"}),
+                                            dcc.Graph(id="tr-dte-chart"),
+                                        ]
+                                    ),
+                                    style={"backgroundColor": BG_CARD, "border": "none"},
+                                ),
+                                md=6,
+                            ),
+                        ],
+                        className="mb-4",
+                    ),
+                ],
+            ),
+
+            html.Div(
+                id="tr-subtab-loss",
+                style={"display": "none"},
+                children=[
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        [
+                                            html.H5("Loss Clusters", className="mb-3", style={"color": "#f8fafc"}),
+                                            html.Div(id="tr-loss-clusters"),
+                                        ]
+                                    ),
+                                    style={"backgroundColor": BG_CARD, "border": "none"},
+                                ),
+                                md=6,
+                            ),
+                            dbc.Col(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        [
+                                            html.H5("Streak Info", className="mb-3", style={"color": "#f8fafc"}),
+                                            html.Div(id="tr-streak-info"),
+                                        ]
+                                    ),
+                                    style={"backgroundColor": BG_CARD, "border": "none"},
+                                ),
+                                md=6,
+                            ),
+                        ],
+                        className="mb-4",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
 def _screener_tab() -> dbc.Tab:
     """Screener tab for put-selling opportunities."""
     return dbc.Tab(
@@ -542,6 +736,8 @@ def create_layout() -> dbc.Container:
             dcc.Store(id="editing-account-id", data=None),
             dcc.Store(id="portfolio-review-data", data={}),
             dcc.Store(id="screener-data", data={}),
+            dcc.Store(id="trade-review-data", data={}),
+            dcc.Store(id="trade-list-data", data=[]),
 
             # One-shot interval to trigger initial data load
             dcc.Interval(id="load-trigger", interval=500, max_intervals=1),
@@ -552,6 +748,7 @@ def create_layout() -> dbc.Container:
                 children=[
                     _positions_tab(),
                     _portfolio_tab(),
+                    _trade_review_tab(),
                     _screener_tab(),
                 ],
                 active_tab="tab-positions",

@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.wsgi import WSGIMiddleware
 
 from .services.cli import CliError
-from .api import accounts, positions, strategies, prices, import_, reports, analyze, portfolio
+from .api import accounts, positions, strategies, prices, import_, reports, analyze, portfolio, trades
 from .frontend import create_dash_app
 
 # Single FastAPI app
@@ -36,6 +36,7 @@ app.include_router(import_.router, prefix="/api/import", tags=["import"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
 app.include_router(analyze.router, prefix="/api/analyze", tags=["analyze"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
+app.include_router(trades.router, prefix="/api/trades", tags=["trades"])
 
 
 @app.get("/api/health")

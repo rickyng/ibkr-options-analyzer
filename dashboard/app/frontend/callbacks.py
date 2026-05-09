@@ -1189,6 +1189,281 @@ def register_callbacks(app: Dash) -> None:
             })
         return rows
 
+    # --- Trade Review tab callbacks ---
+
+    @app.callback(
+        Output("trade-review-data", "data"),
+        Input("main-tabs", "active_tab"),
+    )
+    def load_trade_review_data(active_tab):
+        """Load trade review data when Trade Review tab is selected."""
+        if active_tab != "tab-trade-review":
+            return no_update
+        try:
+            return run_cli("trades")
+        except CliError:
+            return {}
+
+    @app.callback(
+        [
+            Output("trade-review-data", "data", allow_duplicate=True),
+            Output("trade-list-data", "data", allow_duplicate=True),
+            Output("tr-status", "children", allow_duplicate=True),
+            Output("tr-status", "style", allow_duplicate=True),
+        ],
+        Input("tr-rebuild-btn", "n_clicks"),
+        State("tr-account-filter", "value"),
+        prevent_initial_call=True,
+    )
+    def rebuild_trades(n_clicks, account):
+        """Rebuild round-trips and reload data."""
+        if not n_clicks:
+            return no_update, no_update, no_update, no_update
+        try:
+            args: list[str] = ["--rebuild"]
+            if account:
+                args.extend(["--account", account])
+            data = run_cli("trades", *args)
+            trips = data.get("round_trips", [])
+            matched = data.get("overview", {}).get("total_trades", 0)
+            return data, trips, f"Matched {matched} round-trips", {"color": RISK_COLORS["SAFE"]}
+        except CliError as e:
+            return no_update, no_update, f"Error: {e}", {"color": RISK_COLORS["CRITICAL"]}
+
+    @app.callback(
+        [
+            Output("tr-card-total", "children"),
+            Output("tr-card-win-rate", "children"),
+            Output("tr-card-pnl", "children"),
+            Output("tr-card-profit-factor", "children"),
+            Output("tr-card-avg-roc", "children"),
+            Output("tr-card-expectancy", "children"),
+        ],
+        Input("trade-review-data", "data"),
+    )
+    def update_trade_overview_cards(data):
+        """Update KPI cards from overview data."""
+        if not data:
+            return "—", "—", "—", "—", "—", "—"
+        ov = data.get("overview", {})
+        if not ov:
+            return "—", "—", "—", "—", "—", "—"
+
+        total = ov.get("total_trades", 0)
+        win_rate = ov.get("win_rate", 0)
+        pnl = ov.get("total_pnl", 0)
+        pf = ov.get("profit_factor", 0)
+        avg_roc = ov.get("avg_roc", 0)
+        expectancy = ov.get("expectancy", 0)
+
+        pnl_color = RISK_COLORS["SAFE"] if pnl >= 0 else RISK_COLORS["CRITICAL"]
+
+        return (
+            str(total),
+            f"{win_rate:.1%}" if total else "—",
+            f"${pnl:,.0f}" if total else "—",
+            f"{pf:.2f}" if total else "—",
+            f"{avg_roc:.1%}" if total else "—",
+            f"${expectancy:,.2f}" if total else "—",
+        )
+
+    @app.callback(
+        Output("trade-list-data", "data"),
+        Input("trade-review-data", "data"),
+    )
+    def update_trades_table_data(data):
+        """Populate trades DataTable from review data."""
+        if not data:
+            return []
+        return data.get("round_trips", [])
+
+    @app.callback(
+        Output("tr-trades-table", "data"),
+        Input("trade-list-data", "data"),
+    )
+    def render_trades_table(trips):
+        """Render trades table rows."""
+        if not trips:
+            return []
+        return trips
+
+    @app.callback(
+        [
+            Output("tr-subtab-trades", "style"),
+            Output("tr-subtab-strategy", "style"),
+            Output("tr-subtab-loss", "style"),
+        ],
+        Input("trade-subtabs", "active_tab"),
+    )
+    def toggle_trade_subtabs(active_tab):
+        """Show/hide sub-tab content based on active sub-tab."""
+        show = {"display": "block"}
+        hide = {"display": "none"}
+        if active_tab == "subtab-trades":
+            return show, hide, hide
+        elif active_tab == "subtab-strategy":
+            return hide, show, hide
+        elif active_tab == "subtab-loss":
+            return hide, hide, show
+        return show, hide, hide
+
+    @app.callback(
+        Output("tr-strategy-table", "children"),
+        Input("trade-review-data", "data"),
+    )
+    def update_strategy_table(data):
+        """Build strategy performance HTML table."""
+        if not data:
+            return html.P("No data", className="text-muted")
+
+        strategies = data.get("strategy_performance", [])
+        if not strategies:
+            return html.P("No strategy data", className="text-muted")
+
+        header = html.Thead(html.Tr(
+            [
+                html.Th("Strategy", style={"textAlign": "left"}),
+                html.Th("Trades"),
+                html.Th("Wins"),
+                html.Th("Win Rate"),
+                html.Th("Total P&L"),
+                html.Th("Avg P&L"),
+                html.Th("Profit Factor"),
+                html.Th("Avg Days"),
+            ],
+            style={"backgroundColor": "#253449", "color": "#f8fafc"},
+        ))
+
+        rows = []
+        for idx, s in enumerate(strategies):
+            bg = BG_CARD if idx % 2 == 0 else "#253449"
+            pnl = s.get("total_pnl", 0)
+            pnl_color = RISK_COLORS["SAFE"] if pnl >= 0 else RISK_COLORS["CRITICAL"]
+            rows.append(html.Tr([
+                html.Td(s.get("strategy_type", ""), style={"textAlign": "left", "color": "#f8fafc", "backgroundColor": bg}),
+                html.Td(str(s.get("trade_count", 0)), style={"backgroundColor": bg, "color": "#f8fafc"}),
+                html.Td(str(s.get("winning_trades", 0)), style={"backgroundColor": bg, "color": "#f8fafc"}),
+                html.Td(f"{s.get('win_rate', 0):.0%}", style={"backgroundColor": bg, "color": "#f8fafc"}),
+                html.Td(f"${pnl:,.0f}", style={"backgroundColor": bg, "color": pnl_color}),
+                html.Td(f"${s.get('avg_pnl', 0):,.0f}", style={"backgroundColor": bg, "color": "#f8fafc"}),
+                html.Td(f"{s.get('profit_factor', 0):.2f}", style={"backgroundColor": bg, "color": "#f8fafc"}),
+                html.Td(f"{s.get('avg_holding_days', 0):.1f}", style={"backgroundColor": bg, "color": "#f8fafc"}),
+            ]))
+
+        return dbc.Table(
+            [header, html.Tbody(rows)],
+            bordered=True,
+            className="mb-0",
+            style={"backgroundColor": BG_CARD},
+        )
+
+    @app.callback(
+        Output("tr-dte-chart", "figure"),
+        Input("trade-review-data", "data"),
+    )
+    def update_dte_chart(data):
+        """DTE breakdown bar chart."""
+        if not data:
+            return go.Figure()
+
+        buckets = data.get("dte_breakdown", [])
+        if not buckets:
+            return go.Figure()
+
+        labels = [b.get("dte_bucket", "") for b in buckets]
+        pnls = [b.get("total_pnl", 0) for b in buckets]
+        win_rates = [b.get("win_rate", 0) * 100 for b in buckets]
+        counts = [b.get("trade_count", 0) for b in buckets]
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            name="P&L",
+            x=labels,
+            y=pnls,
+            marker_color=[RISK_COLORS["SAFE"] if p >= 0 else RISK_COLORS["CRITICAL"] for p in pnls],
+            text=[f"${p:,.0f}" for p in pnls],
+            textposition="auto",
+        ))
+
+        fig.update_layout(
+            barmode="group",
+            xaxis_title="DTE Bucket",
+            yaxis_title="P&L ($)",
+            paper_bgcolor=BG_CARD,
+            plot_bgcolor=BG_CARD,
+            font={"color": "#f8fafc"},
+            xaxis={"gridcolor": "#334155"},
+            yaxis={"gridcolor": "#334155"},
+            margin={"l": 40, "r": 20, "t": 20, "b": 40},
+            showlegend=False,
+        )
+        return fig
+
+    @app.callback(
+        Output("tr-loss-clusters", "children"),
+        Input("trade-review-data", "data"),
+    )
+    def update_loss_clusters(data):
+        """Display loss cluster list."""
+        if not data:
+            return html.P("No data", className="text-muted")
+
+        clusters = data.get("loss_clusters", [])
+        if not clusters:
+            return html.P("No loss clusters found", className="text-muted", style={"color": RISK_COLORS["SAFE"]})
+
+        items = []
+        for c in clusters:
+            key = c.get("cluster_key", "")
+            loss_count = c.get("loss_count", 0)
+            total_loss = c.get("total_loss", 0)
+            underlying = c.get("underlying", "")
+            strategy = c.get("strategy_type", "")
+            dte = c.get("dte_bucket", "")
+
+            label_parts = [p for p in [underlying, dte, strategy] if p]
+            label = " / ".join(label_parts) if label_parts else key
+
+            items.append(html.Div(
+                [
+                    html.Strong(label, style={"color": "#f8fafc"}),
+                    html.Span(f"  -- {loss_count} losses, ${total_loss:,.0f}", style={"color": RISK_COLORS["CRITICAL"]}),
+                ],
+                className="mb-1 p-2",
+                style={"backgroundColor": "#253449", "borderRadius": "4px"},
+            ))
+
+        return html.Div(items)
+
+    @app.callback(
+        Output("tr-streak-info", "children"),
+        Input("trade-review-data", "data"),
+    )
+    def update_streak_info(data):
+        """Display streak information."""
+        if not data:
+            return html.P("No data", className="text-muted")
+
+        streak = data.get("streak_info", {})
+        if not streak:
+            return html.P("No streak data", className="text-muted")
+
+        max_consec = streak.get("max_consecutive_losses", 0)
+        streak_end = streak.get("streak_end_date", "—")
+        recovery = streak.get("recovery_date", "—")
+        recovery_days = streak.get("recovery_days", 0)
+        current = streak.get("current_streak", 0)
+
+        items = [
+            _detail_card("Max Consecutive Losses", str(max_consec)),
+            _detail_card("Streak Ended", streak_end),
+            _detail_card("Recovery Date", recovery if recovery != "—" else "Not recovered"),
+            _detail_card("Recovery Days", str(recovery_days) if recovery != "—" else "—"),
+            _detail_card("Current Streak", f"{current}" + (" (loss)" if current < 0 else " (win)" if current > 0 else "")),
+        ]
+
+        return dbc.Row([dbc.Col(item, width=4) for item in items], className="g-2")
+
 
 def _detail_card(label: str, value: str) -> html.Div:
     """Create a small metric card for detail panel."""
