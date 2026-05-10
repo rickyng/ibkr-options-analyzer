@@ -1,7 +1,7 @@
 """Dash callbacks for IBKR Options Dashboard."""
 
 from collections import defaultdict, Counter
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 
 import plotly.graph_objects as go
 from dash import Dash, Output, Input, State, html, no_update
@@ -96,6 +96,23 @@ def _fetch_accounts() -> list:
     return query("SELECT id, name, token, query_id, enabled FROM accounts ORDER BY name")
 
 
+def _clear_account_downloads(account_name: str) -> None:
+    """Remove previous CSV downloads for an account (YTD data supersedes old files)."""
+    import os
+    from pathlib import Path
+
+    download_dir = Path.home() / ".ibkr-options-analyzer" / "downloads"
+    if not download_dir.exists():
+        return
+
+    sanitized_name = account_name.replace(" ", "_")
+    pattern = f"flex_report_{sanitized_name}_"
+
+    for csv_file in download_dir.glob("*.csv"):
+        if csv_file.name.startswith(pattern):
+            os.remove(csv_file)
+
+
 def _parse_expiry(expiry_str: str) -> date | None:
     """Parse expiry string in YYYYMMDD or YYYY-MM-DD format."""
     if not expiry_str:
@@ -124,6 +141,13 @@ def _derive_market_from_symbol(underlying: str) -> str:
     if symbol_core.isdigit():
         return "HK"
     return "US"
+
+
+def _rt_pnl(rt: dict) -> float:
+    """Get the effective P&L for a round-trip, preferring net_pnl over realized_pnl."""
+    if "net_pnl" in rt:
+        return rt["net_pnl"]
+    return rt.get("realized_pnl", 0)
 
 
 def _flatten_calendar(calendar: dict) -> list:
@@ -228,6 +252,181 @@ def register_callbacks(app: Dash) -> None:
             filtered = [p for p in filtered if p.get("risk_category") == risk]
         return filtered
 
+    # --- Portfolio tab filters ---
+
+    @app.callback(
+        Output("pf-account-tabs", "children"),
+        Input("accounts-data", "data"),
+    )
+    def update_pf_account_tabs(accounts):
+        """Populate portfolio account tabs from API data."""
+        tabs = [dbc.Tab(label="All Accounts", tab_id="all")]
+        for acc in accounts:
+            name = acc.get("name", "")
+            tabs.append(dbc.Tab(label=name, tab_id=name))
+        return tabs
+
+    @app.callback(
+        Output("pf-filtered-data", "data"),
+        [
+            Input("portfolio-review-data", "data"),
+            Input("pf-account-tabs", "active_tab"),
+            Input("pf-market-filter", "value"),
+            Input("pf-risk-filter", "value"),
+        ],
+    )
+    def apply_pf_filters(data, active_account, market, risk):
+        """Filter portfolio data by account, market, and risk."""
+        if not data or "data" not in data:
+            return data
+
+        positions = data["data"].get("positions", [])
+        account = None if active_account == "all" else active_account
+
+        if account:
+            positions = [p for p in positions if p.get("account") == account]
+        if market and market != "All Markets":
+            positions = [p for p in positions if _derive_market_from_symbol(p.get("underlying", "")) == market]
+        if risk and risk != "All Risks":
+            positions = [p for p in positions if p.get("risk_alert", "").upper() == risk or p.get("risk_category") == risk]
+
+        filtered = {**data["data"], "positions": positions}
+
+        # Recompute summary from filtered positions
+        premium = sum(
+            _convert_to_usd(
+                abs(p.get("entry_premium", 0) * p.get("quantity", 1) * p.get("multiplier", 100)),
+                p.get("currency", "USD"),
+            )
+            for p in positions
+        )
+        pnl = sum(p.get("pnl", 0) for p in positions)
+        itm = sum(1 for p in positions if p.get("risk_alert") == "ITM")
+        near = sum(1 for p in positions if p.get("risk_alert") == "NEAR")
+        expiring = sum(1 for p in positions if p.get("risk_alert") == "EXPIRING")
+
+        filtered["total_premium_collected"] = premium
+        filtered["total_unrealized_pnl"] = pnl
+        filtered["itm_count"] = itm
+        filtered["near_money_count"] = near
+        filtered["expiring_soon_count"] = expiring
+
+        return {"data": filtered}
+
+    # --- Trade Review tab filters ---
+
+    @app.callback(
+        Output("tr-account-tabs", "children"),
+        Input("accounts-data", "data"),
+    )
+    def update_tr_account_tabs(accounts):
+        """Populate trade review account tabs from API data."""
+        tabs = [dbc.Tab(label="All Accounts", tab_id="all")]
+        for acc in accounts:
+            name = acc.get("name", "")
+            tabs.append(dbc.Tab(label=name, tab_id=name))
+        return tabs
+
+    @app.callback(
+        Output("tr-filtered-data", "data"),
+        [
+            Input("trade-review-data", "data"),
+            Input("tr-account-tabs", "active_tab"),
+            Input("tr-market-filter", "value"),
+            Input("tr-risk-filter", "value"),
+        ],
+    )
+    def apply_tr_filters(data, active_account, market, risk):
+        """Filter trade review data by account, market, and risk."""
+        if not data:
+            return data
+
+        round_trips = data.get("round_trips", [])
+        account = None if active_account == "all" else active_account
+
+        if account:
+            round_trips = [rt for rt in round_trips if rt.get("account") == account]
+        if market and market != "All Markets":
+            round_trips = [rt for rt in round_trips if _derive_market_from_symbol(rt.get("underlying", "")) == market]
+        if risk and risk != "All Risks":
+            # Round-trips don't have risk_category; pass all through
+            pass
+
+        # Recompute overview metrics from filtered round-trips
+        total = len(round_trips)
+        winners = [rt for rt in round_trips if _rt_pnl(rt) > 0]
+        losers = [rt for rt in round_trips if _rt_pnl(rt) < 0]
+        win_rate = len(winners) / total if total > 0 else 0
+        total_pnl = sum(_rt_pnl(rt) for rt in round_trips)
+        gross_profit = sum(_rt_pnl(rt) for rt in winners)
+        gross_loss = abs(sum(_rt_pnl(rt) for rt in losers))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf") if gross_profit > 0 else 0
+        avg_winner = sum(_rt_pnl(rt) for rt in winners) / len(winners) if winners else 0
+        avg_loser = sum(_rt_pnl(rt) for rt in losers) / len(losers) if losers else 0
+        expectancy = (win_rate * avg_winner + (1 - win_rate) * avg_loser) if total > 0 else 0
+        avg_days = sum(rt.get("holding_days", 0) for rt in round_trips) / total if total > 0 else 0
+        avg_roc = sum(rt.get("roc", 0) for rt in round_trips) / total if total > 0 else 0
+        avg_ann = sum(rt.get("annualized_return", 0) for rt in round_trips) / total if total > 0 else 0
+
+        # Monthly breakdown (YTD)
+        from datetime import date as _fdate
+        _fy = _fdate.today().year
+        # Normalize close_date to YYYY-MM format (handle both YYYY-MM-DD and YYYYMMDD)
+        def _normalize_month(cd: str) -> str:
+            if not cd:
+                return ""
+            if "-" in cd:
+                return cd[:7]  # YYYY-MM-DD → YYYY-MM
+            elif len(cd) >= 6:
+                return cd[:4] + "-" + cd[4:6]  # YYYYMMDD → YYYY-MM
+            return cd
+
+        _mm: dict[str, list] = {}
+        for rt in round_trips:
+            cd = _normalize_month(rt.get("close_date", ""))
+            if not cd or int(cd[:4]) != _fy:
+                continue
+            _mm.setdefault(cd, []).append(rt)
+
+        _mnames = {
+            "01": "Jan", "02": "Feb", "03": "Mar", "04": "Apr",
+            "05": "May", "06": "Jun", "07": "Jul", "08": "Aug",
+            "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dec",
+        }
+        monthly = []
+        for _mk in sorted(_mm.keys()):
+            _mt = _mm[_mk]
+            monthly.append({
+                "month": _mk,
+                "month_label": _mnames.get(_mk[5:], _mk),
+                "trade_count": len(_mt),
+                "option_pnl": sum(t.get("realized_pnl", 0) for t in _mt),
+                "stock_pnl": sum(t.get("assigned_stock_pnl", 0) for t in _mt),
+                "total_pnl": sum(_rt_pnl(t) for t in _mt),
+            })
+
+        return {
+            **data,
+            "round_trips": round_trips,
+            "monthly_breakdown": monthly,
+            "overview": {
+                "total_trades": total,
+                "winning_trades": len(winners),
+                "losing_trades": len(losers),
+                "win_rate": win_rate,
+                "total_option_pnl": sum(rt.get("realized_pnl", 0) for rt in round_trips),
+                "total_stock_pnl": sum(rt.get("assigned_stock_pnl", 0) for rt in round_trips),
+                "total_pnl": total_pnl,
+                "avg_winner": avg_winner,
+                "avg_loser": avg_loser,
+                "profit_factor": profit_factor,
+                "expectancy": expectancy,
+                "avg_holding_days": avg_days,
+                "avg_roc": avg_roc,
+                "avg_annualized_return": avg_ann,
+            },
+        }
+
     # Callback: Update summary cards
     @app.callback(
         [
@@ -287,29 +486,27 @@ def register_callbacks(app: Dash) -> None:
         Input("filtered-positions-data", "data"),
     )
     def update_expiry_chart(positions):
-        """Create stacked bar chart of positions grouped by calendar week buckets."""
+        """Create stacked bar chart of positions grouped by days-to-expiry buckets."""
         if not positions:
             return go.Figure()
 
-        # Calendar week buckets (ISO week offset from current week)
-        bucket_labels = ["This Week", "Next Week", "Week 3", "Week 4", "Week 5+"]
+        # Define DTE buckets
+        bucket_labels = ["<7 days", "7-14 days", "14-21 days", "21-28 days", ">28 days"]
+        bucket_ranges = [(0, 7), (7, 14), (14, 21), (21, 28), (28, 999)]
         bucket_risks: dict[str, Counter] = {label: Counter() for label in bucket_labels}
-
-        today = date.today()
-        today_monday = today - timedelta(days=today.weekday())
 
         for pos in positions:
             expiry_date = _parse_expiry(pos.get("expiry", ""))
             if not expiry_date:
                 continue
-            expiry_monday = expiry_date - timedelta(days=expiry_date.weekday())
-            week_offset = (expiry_monday - today_monday).days // 7
+            days_to_expiry = (expiry_date - date.today()).days
 
-            if week_offset <= 0: bucket_idx = 0
-            elif week_offset == 1: bucket_idx = 1
-            elif week_offset == 2: bucket_idx = 2
-            elif week_offset == 3: bucket_idx = 3
-            else: bucket_idx = 4
+            # Find appropriate bucket
+            bucket_idx = 0
+            for i, (low, high) in enumerate(bucket_ranges):
+                if low <= days_to_expiry < high:
+                    bucket_idx = i
+                    break
 
             risk = pos.get("risk_category", "SAFE")
             bucket_risks[bucket_labels[bucket_idx]][risk] += 1
@@ -330,7 +527,7 @@ def register_callbacks(app: Dash) -> None:
 
         fig.update_layout(
             barmode="stack",
-            xaxis_title="Calendar Week",
+            xaxis_title="Days to Expiry",
             yaxis_title="Positions",
             paper_bgcolor=BG_CARD,
             plot_bgcolor=BG_CARD,
@@ -347,87 +544,6 @@ def register_callbacks(app: Dash) -> None:
             },
         )
         return fig
-
-    # Callback: Update expiry stock table
-    @app.callback(
-        Output("expiry-stock-table", "children"),
-        Input("filtered-positions-data", "data"),
-    )
-    def update_expiry_stock_table(positions):
-        """Create table of positions grouped by stock across calendar week buckets."""
-        if not positions:
-            return html.P("No position data", className="text-muted")
-
-        bucket_labels = ["This Week", "Next Week", "Week 3", "Week 4", "Week 5+"]
-
-        # Store (strike, risk_category) pairs per stock per bucket
-        stock_buckets: dict[str, dict[str, list[tuple[float, str]]]] = {}
-
-        today = date.today()
-        today_monday = today - timedelta(days=today.weekday())
-
-        for pos in positions:
-            expiry_date = _parse_expiry(pos.get("expiry", ""))
-            if not expiry_date:
-                continue
-
-            underlying = pos.get("underlying", "")
-            strike = pos.get("strike", 0) or 0
-            risk = pos.get("risk_category", "SAFE")
-
-            if underlying not in stock_buckets:
-                stock_buckets[underlying] = {b: [] for b in bucket_labels}
-
-            expiry_monday = expiry_date - timedelta(days=expiry_date.weekday())
-            week_offset = (expiry_monday - today_monday).days // 7
-
-            if week_offset <= 0: bucket_idx = 0
-            elif week_offset == 1: bucket_idx = 1
-            elif week_offset == 2: bucket_idx = 2
-            elif week_offset == 3: bucket_idx = 3
-            else: bucket_idx = 4
-
-            stock_buckets[underlying][bucket_labels[bucket_idx]].append((strike, risk))
-
-        if not stock_buckets:
-            return html.P("No position data", className="text-muted")
-
-        header_cells = [
-            html.Th("Stock", style={"textAlign": "left", "padding": "6px 10px", "color": "#94a3b8", "fontWeight": "600"})
-        ]
-        for label in bucket_labels:
-            header_cells.append(html.Th(label, style={"textAlign": "center", "padding": "6px 10px", "color": "#94a3b8", "fontWeight": "600"}))
-
-        rows = []
-        for idx, stock in enumerate(sorted(stock_buckets.keys())):
-            row_bg = "#1e293b" if idx % 2 == 0 else "#253449"
-            cells = [
-                html.Td(stock, style={"textAlign": "left", "padding": "6px 10px", "color": "#f8fafc", "backgroundColor": row_bg})
-            ]
-            for label in bucket_labels:
-                entries = stock_buckets[stock][label]
-                if entries:
-                    parts = []
-                    for strike, risk in sorted(entries, key=lambda x: x[0]):
-                        color = RISK_COLORS.get(risk, TEXT_MUTED)
-                        parts.append(html.Span(f"${strike:.0f}", style={"color": color}))
-                    # Join with comma separator
-                    strike_spans = []
-                    for i, span in enumerate(parts):
-                        strike_spans.append(span)
-                        if i < len(parts) - 1:
-                            strike_spans.append(html.Span(", ", style={"color": "#475569"}))
-                    cells.append(html.Td(strike_spans, style={"textAlign": "center", "padding": "6px 10px", "backgroundColor": row_bg}))
-                else:
-                    cells.append(html.Td("—", style={"textAlign": "center", "padding": "6px 10px", "color": "#475569", "backgroundColor": row_bg}))
-            rows.append(html.Tr(cells))
-
-        return dbc.Table(
-            [html.Thead(html.Tr(header_cells)), html.Tbody(rows)],
-            bordered=False,
-            size="sm",
-            style={"backgroundColor": "transparent"},
-        )
 
     # Callback: Update exposure table
     @app.callback(
@@ -620,6 +736,9 @@ def register_callbacks(app: Dash) -> None:
                 errors.append(f"{name}: missing token/query_id")
                 continue
 
+            # Remove previous downloads for this account (YTD data supersedes)
+            _clear_account_downloads(name)
+
             try:
                 download_flex(token, query_id, name, force=True)
                 updated_accounts.append(name)
@@ -634,14 +753,23 @@ def register_callbacks(app: Dash) -> None:
             )
 
         # Import all downloaded CSVs
+        import_result_data = {}
         try:
-            import_csv()
+            import_result_data = import_csv()
         except CliError as e:
             return (
                 f"Import error: {e}",
                 {"color": RISK_COLORS["CRITICAL"]},
                 no_update, no_update, no_update, no_update, no_update,
             )
+
+        # Run trade matching after import
+        match_count = 0
+        try:
+            rebuild_result = run_cli("trades", "--rebuild")
+            match_count = rebuild_result.get("overview", {}).get("total_trades", 0)
+        except CliError:
+            pass  # Non-fatal — matching failure shouldn't block the UI
 
         # Refresh all dashboard data
         portfolio = _fetch_portfolio_risk()
@@ -650,8 +778,15 @@ def register_callbacks(app: Dash) -> None:
         positions = _flatten_calendar(calendar)
         accounts = _fetch_accounts()
 
+        trades_in = import_result_data.get("trades_imported", 0)
+        pos_in = import_result_data.get("positions_imported", 0)
+        status = f"Updated {len(updated_accounts)}: {', '.join(updated_accounts)}"
+        if trades_in or pos_in:
+            status += f" | {trades_in} trades, {pos_in} positions"
+        status += f" | Matched {match_count} round-trips"
+
         return (
-            f"Updated {len(updated_accounts)}: {', '.join(updated_accounts)}",
+            status,
             {"color": RISK_COLORS["SAFE"]},
             portfolio, exposure, calendar, positions, accounts,
         )
@@ -893,7 +1028,7 @@ def register_callbacks(app: Dash) -> None:
             Output("pf-card-near", "children"),
             Output("pf-card-expiring", "children"),
         ],
-        Input("portfolio-review-data", "data"),
+        Input("pf-filtered-data", "data"),
     )
     def update_portfolio_cards(data):
         """Update portfolio summary cards."""
@@ -912,7 +1047,7 @@ def register_callbacks(app: Dash) -> None:
 
     @app.callback(
         Output("pf-risk-alerts", "children"),
-        Input("portfolio-review-data", "data"),
+        Input("pf-filtered-data", "data"),
     )
     def update_portfolio_alerts(data):
         """Render risk alerts section."""
@@ -950,7 +1085,7 @@ def register_callbacks(app: Dash) -> None:
 
     @app.callback(
         Output("pf-position-table", "data"),
-        Input("portfolio-review-data", "data"),
+        Input("pf-filtered-data", "data"),
     )
     def update_portfolio_table(data):
         """Update portfolio positions table."""
@@ -979,7 +1114,7 @@ def register_callbacks(app: Dash) -> None:
 
     @app.callback(
         Output("pf-loss-scenarios", "children"),
-        Input("portfolio-review-data", "data"),
+        Input("pf-filtered-data", "data"),
     )
     def update_loss_scenarios(data):
         """Render per-account loss scenarios."""
@@ -1027,7 +1162,7 @@ def register_callbacks(app: Dash) -> None:
 
     @app.callback(
         Output("pf-expiry-calendar", "children"),
-        Input("portfolio-review-data", "data"),
+        Input("pf-filtered-data", "data"),
     )
     def update_expiry_calendar(data):
         """Render expiration calendar buckets."""
@@ -1041,11 +1176,10 @@ def register_callbacks(app: Dash) -> None:
             return html.P("No positions", className="text-muted")
 
         bucket_info = [
-            ("W1", "Week 1 (0-7 days)", RISK_COLORS["CRITICAL"]),
-            ("W2", "Week 2 (8-14 days)", RISK_COLORS["HIGH"]),
-            ("W3", "Week 3 (15-21 days)", RISK_COLORS["MODERATE"]),
-            ("W4", "Week 4 (22-28 days)", RISK_COLORS["MODERATE"]),
-            ("W5+", "Week 5+ (29+ days)", RISK_COLORS["SAFE"]),
+            ("<=7", "Expiring (<=7 days)", RISK_COLORS["CRITICAL"]),
+            ("8-30", "Near-term (8-30 days)", RISK_COLORS["HIGH"]),
+            ("31-60", "Medium (31-60 days)", RISK_COLORS["MODERATE"]),
+            ("60+", "Far (60+ days)", RISK_COLORS["SAFE"]),
         ]
 
         blocks = []
@@ -1099,52 +1233,6 @@ def register_callbacks(app: Dash) -> None:
 
     @app.callback(
         [
-            Output("screener-data", "data", allow_duplicate=True),
-            Output("screener-status", "children", allow_duplicate=True),
-            Output("screener-status", "style", allow_duplicate=True),
-        ],
-        Input("run-screener-cache-btn", "n_clicks"),
-        [
-            State("sc-iv-percentile", "value"),
-            State("sc-premium-yield", "value"),
-            State("sc-min-dte", "value"),
-            State("sc-max-dte", "value"),
-            State("sc-otm-buffer", "value"),
-        ],
-        prevent_initial_call=True,
-    )
-    def run_screener_cache_only(n_clicks, iv_pctl, prem_yield, min_dte, max_dte, otm_buf):
-        """Run screener using cached data only with parameter overrides."""
-        if not n_clicks:
-            return no_update, no_update, no_update
-
-        args = ["screener", "--cache-only"]
-        if iv_pctl is not None:
-            args.extend(["--min-iv-percentile", str(iv_pctl)])
-        if prem_yield is not None:
-            args.extend(["--min-premium-yield", str(prem_yield)])
-        if min_dte is not None:
-            args.extend(["--min-dte", str(min_dte)])
-        if max_dte is not None:
-            args.extend(["--max-dte", str(max_dte)])
-        if otm_buf is not None:
-            args.extend(["--otm-buffer", str(otm_buf)])
-
-        try:
-            data = run_cli("analyze", *args)
-            d = data.get("data", {})
-            scanned = d.get("total_scanned", 0)
-            passed = d.get("passed_filter", 0)
-            errors = d.get("errors", [])
-            status = f"(Cache) Scanned {scanned}, {passed} passed"
-            if errors:
-                status += f", {len(errors)} no cache"
-            return data, status, {"color": "#60a5fa"}  # blue for cache mode
-        except CliError as e:
-            return {}, str(e), {"color": RISK_COLORS["CRITICAL"]}
-
-    @app.callback(
-        [
             Output("sc-card-scanned", "children"),
             Output("sc-card-passed", "children"),
             Output("sc-card-errors", "children"),
@@ -1191,6 +1279,287 @@ def register_callbacks(app: Dash) -> None:
 
     # --- Trade Review tab callbacks ---
 
+    def _convert_trades_to_usd(data: dict) -> dict:
+        """Convert all P&L values in trade review data to USD.
+
+        For assigned trades: Option P&L = premium only.
+        Stock P&L = assignment exposure at current market price.
+        Net P&L = option P&L + stock P&L.
+        """
+        if not data:
+            return data
+
+        trips = data.get("round_trips", [])
+        if not trips:
+            return data
+
+        # Derive actual multiplier from each round-trip's data
+        # (net_premium = qty × open_price × multiplier)
+        for rt in trips:
+            qty = abs(rt.get("quantity", 0))
+            op = abs(rt.get("open_price", 0))
+            np_val = abs(rt.get("net_premium", 0))
+            if qty > 0 and op > 0:
+                rt["_multiplier"] = round(np_val / (qty * op))
+            else:
+                rt["_multiplier"] = 100
+
+        # Recalculate P&L for assigned trades: option P&L = premium only,
+        # stock P&L = assignment exposure at current market price, net = sum.
+        assigned = [rt for rt in trips if rt.get("close_reason") == "assigned"]
+        if assigned:
+            underlyings = [s for s in set(rt.get("underlying", "") for rt in assigned) if s]
+            if underlyings:
+                placeholders = ",".join("?" for _ in underlyings)
+                price_rows = query(
+                    f"SELECT symbol, price FROM cached_prices WHERE symbol IN ({placeholders})",
+                    tuple(underlyings),
+                )
+            else:
+                price_rows = []
+            prices = {r["symbol"]: r["price"] for r in price_rows}
+
+            for rt in assigned:
+                underlying = rt.get("underlying", "")
+                current_price = prices.get(underlying)
+                if current_price is None:
+                    continue
+
+                strike = rt.get("strike", 0)
+                right = rt.get("right", "P")
+                qty = rt.get("quantity", 1)
+                open_price = rt.get("open_price", 0)
+                commission = rt.get("commission", 0)
+                multiplier = rt.get("_multiplier", 100)
+                currency = _derive_currency_from_symbol(underlying)
+
+                # Option P&L is always just the premium received
+                option_pnl = qty * multiplier * open_price - commission
+                rt["realized_pnl"] = _convert_to_usd(option_pnl, currency)
+                rt["close_price"] = 0
+
+                # Stock P&L from assignment (compared to current market price)
+                # Short put assigned: bought stock at strike, P&L = (current - strike) × qty × mult
+                # Short call assigned: sold stock at strike, P&L = (strike - current) × qty × mult
+                if right == "P":
+                    stock_pnl = (current_price - strike) * qty * multiplier
+                else:
+                    stock_pnl = (strike - current_price) * qty * multiplier
+                rt["assigned_stock_pnl"] = _convert_to_usd(stock_pnl, currency)
+                rt["net_pnl"] = rt["realized_pnl"] + rt["assigned_stock_pnl"]
+                rt["assigned_shares"] = int(qty * multiplier)
+                rt["current_price"] = current_price
+
+        # Convert remaining P&L values to USD
+        for rt in trips:
+            if rt.get("close_reason") != "assigned":
+                underlying = rt.get("underlying", "")
+                currency = _derive_currency_from_symbol(underlying)
+                for key in ("realized_pnl", "net_premium"):
+                    if key in rt:
+                        rt[key] = _convert_to_usd(rt[key], currency)
+
+            # Clean up internal keys
+            rt.pop("_multiplier", None)
+
+        # Recompute overview from converted round-trips
+        if trips:
+            # For assigned trades, net_pnl includes option + stock P&L;
+            # for others, realized_pnl is the complete P&L.
+            pnls = [_rt_pnl(t) for t in trips]
+            wins = [p for p in pnls if p >= 0]
+            losses = [p for p in pnls if p < 0]
+            total_pnl = sum(pnls)
+            total_wins = sum(wins)
+            total_losses = abs(sum(losses))
+            holding_days = [t.get("holding_days", 0) for t in trips if t.get("holding_days")]
+
+            data["overview"] = {
+                "total_trades": len(trips),
+                "winning_trades": len(wins),
+                "losing_trades": len(losses),
+                "win_rate": len(wins) / len(trips) if trips else 0,
+                "total_option_pnl": sum(t.get("realized_pnl", 0) for t in trips),
+                "total_stock_pnl": sum(t.get("assigned_stock_pnl", 0) for t in trips),
+                "total_pnl": total_pnl,
+                "avg_winner": total_wins / len(wins) if wins else 0,
+                "avg_loser": total_losses / len(losses) if losses else 0,
+                "profit_factor": total_wins / total_losses if total_losses else 0,
+                "expectancy": total_pnl / len(trips) if trips else 0,
+                "avg_holding_days": sum(holding_days) / len(holding_days) if holding_days else 0,
+                "avg_roc": sum(t.get("roc", 0) for t in trips) / len(trips),
+                "avg_annualized_return": sum(t.get("annualized_return", 0) for t in trips) / len(trips),
+            }
+
+        # Monthly breakdown (YTD)
+        from datetime import date as _date
+        current_year = _date.today().year
+        # Normalize close_date to YYYY-MM format (handle both YYYY-MM-DD and YYYYMMDD)
+        def _norm_month(cd: str) -> str:
+            if not cd:
+                return ""
+            if "-" in cd:
+                return cd[:7]
+            elif len(cd) >= 6:
+                return cd[:4] + "-" + cd[4:6]
+            return cd
+
+        month_map: dict[str, list] = {}
+        for t in trips:
+            cd = _norm_month(t.get("close_date", ""))
+            if not cd or int(cd[:4]) != current_year:
+                continue
+            month_map.setdefault(cd, []).append(t)
+
+        month_names = {
+            "01": "Jan", "02": "Feb", "03": "Mar", "04": "Apr",
+            "05": "May", "06": "Jun", "07": "Jul", "08": "Aug",
+            "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dec",
+        }
+        data["monthly_breakdown"] = []
+        for month_key in sorted(month_map.keys()):
+            m_trips = month_map[month_key]
+            opt_pnl = sum(t.get("realized_pnl", 0) for t in m_trips)
+            stk_pnl = sum(t.get("assigned_stock_pnl", 0) for t in m_trips)
+            net = sum(_rt_pnl(t) for t in m_trips)
+            data["monthly_breakdown"].append({
+                "month": month_key,
+                "month_label": month_names.get(month_key[5:], month_key),
+                "trade_count": len(m_trips),
+                "option_pnl": opt_pnl,
+                "stock_pnl": stk_pnl,
+                "total_pnl": net,
+            })
+
+        # Recompute strategy performance from converted round-trips
+        strat_map: dict[str, list] = {}
+        for t in trips:
+            st = t.get("strategy_type") or "Unknown"
+            strat_map.setdefault(st, []).append(t)
+
+        data["strategy_performance"] = []
+        for st, st_trips in sorted(strat_map.items()):
+            st_pnls = [_rt_pnl(t) for t in st_trips]
+            st_wins = [p for p in st_pnls if p >= 0]
+            st_losses = [p for p in st_pnls if p < 0]
+            st_total = sum(st_pnls)
+            st_total_wins = sum(st_wins)
+            st_total_losses = abs(sum(st_losses))
+            st_days = [t.get("holding_days", 0) for t in st_trips if t.get("holding_days")]
+            data["strategy_performance"].append({
+                "strategy_type": st,
+                "trade_count": len(st_trips),
+                "winning_trades": len(st_wins),
+                "win_rate": len(st_wins) / len(st_trips) if st_trips else 0,
+                "total_pnl": st_total,
+                "avg_pnl": st_total / len(st_trips) if st_trips else 0,
+                "profit_factor": st_total_wins / st_total_losses if st_total_losses else 0,
+                "avg_holding_days": sum(st_days) / len(st_days) if st_days else 0,
+            })
+
+        # Recompute DTE breakdown
+        dte_map: dict[str, list] = {}
+        for t in trips:
+            days = t.get("holding_days", 0)
+            if days <= 7:
+                bucket = "0-7"
+            elif days <= 14:
+                bucket = "8-14"
+            elif days <= 30:
+                bucket = "15-30"
+            elif days <= 60:
+                bucket = "31-60"
+            else:
+                bucket = "60+"
+            dte_map.setdefault(bucket, []).append(t)
+
+        data["dte_breakdown"] = []
+        for bucket in ("0-7", "8-14", "15-30", "31-60", "60+"):
+            dte_trips = dte_map.get(bucket, [])
+            if not dte_trips:
+                continue
+            dte_pnls = [_rt_pnl(t) for t in dte_trips]
+            dte_wins = [p for p in dte_pnls if p >= 0]
+            data["dte_breakdown"].append({
+                "dte_bucket": bucket,
+                "trade_count": len(dte_trips),
+                "winning_trades": len(dte_wins),
+                "win_rate": len(dte_wins) / len(dte_trips) if dte_trips else 0,
+                "total_pnl": sum(dte_pnls),
+            })
+
+        # Recompute loss clusters
+        loss_map: dict[str, list] = {}
+        for t in trips:
+            pnl = _rt_pnl(t)
+            if pnl < 0:
+                underlying = t.get("underlying", "")
+                days = t.get("holding_days", 0)
+                bucket = "0-7" if days <= 7 else "8-14" if days <= 14 else "15-30" if days <= 30 else "31-60" if days <= 60 else "60+"
+                key = f"{underlying}|{bucket}"
+                loss_map.setdefault(key, []).append({"pnl": pnl, **t})
+
+        data["loss_clusters"] = []
+        for key, loss_trips in sorted(loss_map.items(), key=lambda x: sum(t["pnl"] for t in x[1])):
+            underlying, dte = key.split("|", 1)
+            data["loss_clusters"].append({
+                "cluster_key": key,
+                "underlying": underlying,
+                "dte_bucket": dte,
+                "loss_count": len(loss_trips),
+                "total_loss": sum(t["pnl"] for t in loss_trips),
+            })
+
+        # Recompute streak info
+        sorted_trips = sorted(trips, key=lambda t: (t.get("close_date", ""), t.get("open_date", "")))
+        max_consec = 0
+        current_streak = 0
+        consec = 0
+        streak_end = ""
+        for t in sorted_trips:
+            pnl = _rt_pnl(t)
+            if pnl < 0:
+                consec += 1
+                current_streak = -(consec) if current_streak <= 0 else -1
+                if consec > max_consec:
+                    max_consec = consec
+                    streak_end = t.get("close_date", "")
+            else:
+                if current_streak < 0:
+                    current_streak = 1
+                else:
+                    current_streak = max(current_streak, 0) + 1
+                consec = 0
+
+        data["streak_info"] = {
+            "max_consecutive_losses": max_consec,
+            "streak_end_date": streak_end,
+            "recovery_date": "",
+            "recovery_days": 0,
+            "current_streak": current_streak,
+        }
+
+        # Recompute underlying breakdown
+        ul_map: dict[str, list] = {}
+        for t in trips:
+            ul = t.get("underlying", "")
+            ul_map.setdefault(ul, []).append(t)
+
+        data["underlying_breakdown"] = []
+        for ul, ul_trips in sorted(ul_map.items(), key=lambda x: sum(_rt_pnl(t) for t in x[1]), reverse=True):
+            ul_pnls = [_rt_pnl(t) for t in ul_trips]
+            ul_wins = [p for p in ul_pnls if p >= 0]
+            data["underlying_breakdown"].append({
+                "underlying": ul,
+                "trade_count": len(ul_trips),
+                "winning_trades": len(ul_wins),
+                "win_rate": len(ul_wins) / len(ul_trips) if ul_trips else 0,
+                "total_pnl": sum(ul_pnls),
+                "avg_pnl": sum(ul_pnls) / len(ul_trips) if ul_trips else 0,
+            })
+
+        return data
+
     @app.callback(
         Output("trade-review-data", "data"),
         Input("main-tabs", "active_tab"),
@@ -1200,76 +1569,165 @@ def register_callbacks(app: Dash) -> None:
         if active_tab != "tab-trade-review":
             return no_update
         try:
-            return run_cli("trades")
+            data = run_cli("trades")
+            return _convert_trades_to_usd(data)
         except CliError:
             return {}
 
     @app.callback(
         [
             Output("trade-review-data", "data", allow_duplicate=True),
-            Output("trade-list-data", "data", allow_duplicate=True),
             Output("tr-status", "children", allow_duplicate=True),
             Output("tr-status", "style", allow_duplicate=True),
         ],
         Input("tr-rebuild-btn", "n_clicks"),
-        State("tr-account-filter", "value"),
+        State("tr-account-tabs", "active_tab"),
         prevent_initial_call=True,
     )
-    def rebuild_trades(n_clicks, account):
+    def rebuild_trades(n_clicks, active_account):
         """Rebuild round-trips and reload data."""
         if not n_clicks:
-            return no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update
         try:
             args: list[str] = ["--rebuild"]
+            account = None if active_account == "all" else active_account
             if account:
                 args.extend(["--account", account])
             data = run_cli("trades", *args)
-            trips = data.get("round_trips", [])
+            data = _convert_trades_to_usd(data)
             matched = data.get("overview", {}).get("total_trades", 0)
-            return data, trips, f"Matched {matched} round-trips", {"color": RISK_COLORS["SAFE"]}
+            return data, f"Matched {matched} round-trips", {"color": RISK_COLORS["SAFE"]}
         except CliError as e:
-            return no_update, no_update, f"Error: {e}", {"color": RISK_COLORS["CRITICAL"]}
+            return no_update, f"Error: {e}", {"color": RISK_COLORS["CRITICAL"]}
 
     @app.callback(
         [
             Output("tr-card-total", "children"),
             Output("tr-card-win-rate", "children"),
+            Output("tr-card-option-pnl", "children"),
+            Output("tr-card-stock-pnl", "children"),
             Output("tr-card-pnl", "children"),
             Output("tr-card-profit-factor", "children"),
             Output("tr-card-avg-roc", "children"),
-            Output("tr-card-expectancy", "children"),
         ],
-        Input("trade-review-data", "data"),
+        Input("tr-filtered-data", "data"),
     )
     def update_trade_overview_cards(data):
         """Update KPI cards from overview data."""
         if not data:
-            return "—", "—", "—", "—", "—", "—"
+            return "—", "—", "—", "—", "—", "—", "—"
         ov = data.get("overview", {})
         if not ov:
-            return "—", "—", "—", "—", "—", "—"
+            return "—", "—", "—", "—", "—", "—", "—"
 
         total = ov.get("total_trades", 0)
-        win_rate = ov.get("win_rate", 0)
-        pnl = ov.get("total_pnl", 0)
-        pf = ov.get("profit_factor", 0)
-        avg_roc = ov.get("avg_roc", 0)
-        expectancy = ov.get("expectancy", 0)
-
-        pnl_color = RISK_COLORS["SAFE"] if pnl >= 0 else RISK_COLORS["CRITICAL"]
+        win_rate = ov.get("win_rate", 0) or 0
+        option_pnl = ov.get("total_option_pnl", 0) or 0
+        stock_pnl = ov.get("total_stock_pnl", 0) or 0
+        total_pnl = ov.get("total_pnl", 0) or 0
+        pf = ov.get("profit_factor") or 0
+        avg_roc = ov.get("avg_roc", 0) or 0
 
         return (
             str(total),
             f"{win_rate:.1%}" if total else "—",
-            f"${pnl:,.0f}" if total else "—",
+            f"${option_pnl:,.0f}" if total else "—",
+            f"${stock_pnl:,.0f}" if total else "—",
+            f"${total_pnl:,.0f}" if total else "—",
             f"{pf:.2f}" if total else "—",
             f"{avg_roc:.1%}" if total else "—",
-            f"${expectancy:,.2f}" if total else "—",
         )
 
     @app.callback(
+        Output("tr-monthly-table", "children"),
+        Input("tr-filtered-data", "data"),
+    )
+    def update_monthly_table(data):
+        """YTD monthly breakdown table."""
+        if not data:
+            return html.P("No data", className="text-muted")
+
+        months = data.get("monthly_breakdown", [])
+        if not months:
+            return html.P("No YTD data", className="text-muted")
+
+        header = html.Thead(html.Tr([
+            html.Th("Month", style={"textAlign": "left"}),
+            html.Th("Trades"),
+            html.Th("Option P&L"),
+            html.Th("Stock P&L"),
+            html.Th("Net P&L"),
+        ], style={"backgroundColor": "#253449", "color": "#f8fafc"}))
+
+        rows = []
+        for idx, m in enumerate(months):
+            bg = BG_CARD if idx % 2 == 0 else "#253449"
+            opt = m.get("option_pnl", 0)
+            stk = m.get("stock_pnl", 0)
+            net = m.get("total_pnl", 0)
+            rows.append(html.Tr([
+                html.Td(m.get("month_label", ""), style={"textAlign": "left", "color": "#f8fafc", "backgroundColor": bg}),
+                html.Td(str(m.get("trade_count", 0)), style={"backgroundColor": bg, "color": "#f8fafc"}),
+                html.Td(f"${opt:,.0f}", style={"backgroundColor": bg, "color": RISK_COLORS["SAFE"] if opt >= 0 else RISK_COLORS["CRITICAL"]}),
+                html.Td(f"${stk:,.0f}", style={"backgroundColor": bg, "color": RISK_COLORS["SAFE"] if stk >= 0 else RISK_COLORS["CRITICAL"]}),
+                html.Td(f"${net:,.0f}", style={"backgroundColor": bg, "color": RISK_COLORS["SAFE"] if net >= 0 else RISK_COLORS["CRITICAL"]}),
+            ]))
+
+        return dbc.Table([header, html.Tbody(rows)], bordered=True, className="mb-0",
+                         style={"backgroundColor": BG_CARD})
+
+    @app.callback(
+        Output("tr-monthly-chart", "figure"),
+        Input("tr-filtered-data", "data"),
+    )
+    def update_monthly_chart(data):
+        """YTD monthly P&L stacked bar chart."""
+        if not data:
+            return go.Figure()
+
+        months = data.get("monthly_breakdown", [])
+        if not months:
+            return go.Figure()
+
+        labels = [m.get("month_label", "") for m in months]
+        opt = [m.get("option_pnl", 0) for m in months]
+        stk = [m.get("stock_pnl", 0) for m in months]
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            name="Option P&L",
+            x=labels,
+            y=opt,
+            marker_color="#22c55e",
+            text=[f"${v:,.0f}" for v in opt],
+            textposition="auto",
+        ))
+        fig.add_trace(go.Bar(
+            name="Stock P&L",
+            x=labels,
+            y=stk,
+            marker_color="#f59e0b",
+            text=[f"${v:,.0f}" for v in stk],
+            textposition="auto",
+        ))
+
+        fig.update_layout(
+            barmode="stack",
+            xaxis_title="Month",
+            yaxis_title="P&L ($)",
+            paper_bgcolor=BG_CARD,
+            plot_bgcolor=BG_CARD,
+            font={"color": "#f8fafc"},
+            xaxis={"gridcolor": "#334155"},
+            yaxis={"gridcolor": "#334155"},
+            margin={"l": 40, "r": 20, "t": 20, "b": 40},
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
+        )
+        return fig
+
+    @app.callback(
         Output("trade-list-data", "data"),
-        Input("trade-review-data", "data"),
+        Input("tr-filtered-data", "data"),
     )
     def update_trades_table_data(data):
         """Populate trades DataTable from review data."""
@@ -1286,6 +1744,18 @@ def register_callbacks(app: Dash) -> None:
         if not trips:
             return []
         return trips
+
+    @app.callback(
+        Output("tr-stock-table", "data"),
+        Input("tr-filtered-data", "data"),
+    )
+    def render_stock_table(data):
+        """Render assigned stock positions table."""
+        if not data:
+            return []
+        trips = data.get("round_trips", [])
+        assigned = [rt for rt in trips if rt.get("close_reason") == "assigned" and "assigned_stock_pnl" in rt]
+        return assigned
 
     @app.callback(
         [
@@ -1309,7 +1779,7 @@ def register_callbacks(app: Dash) -> None:
 
     @app.callback(
         Output("tr-strategy-table", "children"),
-        Input("trade-review-data", "data"),
+        Input("tr-filtered-data", "data"),
     )
     def update_strategy_table(data):
         """Build strategy performance HTML table."""
@@ -1359,7 +1829,7 @@ def register_callbacks(app: Dash) -> None:
 
     @app.callback(
         Output("tr-dte-chart", "figure"),
-        Input("trade-review-data", "data"),
+        Input("tr-filtered-data", "data"),
     )
     def update_dte_chart(data):
         """DTE breakdown bar chart."""
@@ -1401,7 +1871,7 @@ def register_callbacks(app: Dash) -> None:
 
     @app.callback(
         Output("tr-loss-clusters", "children"),
-        Input("trade-review-data", "data"),
+        Input("tr-filtered-data", "data"),
     )
     def update_loss_clusters(data):
         """Display loss cluster list."""
@@ -1437,7 +1907,7 @@ def register_callbacks(app: Dash) -> None:
 
     @app.callback(
         Output("tr-streak-info", "children"),
-        Input("trade-review-data", "data"),
+        Input("tr-filtered-data", "data"),
     )
     def update_streak_info(data):
         """Display streak information."""

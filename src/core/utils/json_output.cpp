@@ -495,6 +495,8 @@ nlohmann::json JsonOutput::portfolio(const services::PortfolioView& view) {
         jp["pnl_percent"] = pp.pnl_percent;
         jp["otm_percent"] = pp.otm_percent;
         jp["annualized_yield"] = pp.annualized_yield;
+        jp["multiplier"] = pp.position.multiplier;
+        jp["currency"] = pp.position.currency;
         if (pp.risk_alert.empty()) {
             jp["risk_alert"] = nlohmann::json{};
         } else {

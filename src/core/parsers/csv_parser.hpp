@@ -26,6 +26,10 @@ struct TradeRecord {
     double proceeds{0.0};
     double commission{0.0};
     double net_cash{0.0};
+    double multiplier{100.0};
+    double fifo_pnl_realized{0.0};
+    double close_price{0.0};
+    std::string notes_codes;
     std::string asset_class;
 
     // Parsed option details (if applicable)

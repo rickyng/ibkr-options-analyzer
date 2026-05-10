@@ -50,110 +50,117 @@ Result<CSVParser::ParseResult> CSVParser::parse_content(
     ParseResult result;
 
     try {
-        // Parse CSV using rapidcsv
+        // IBKR Flex reports contain multiple CSV sections (positions, trades, transactions)
+        // each with their own header row starting with "ClientAccountID".
+        // rapidcsv only reads the first header, so we split and parse each section.
         std::stringstream ss(csv_content);
-        rapidcsv::Document doc(ss, rapidcsv::LabelParams(0, -1));
+        std::string line;
+        std::vector<std::string> section_lines;
+        std::vector<std::vector<std::string>> sections;
 
-        // Get column names
-        std::vector<std::string> column_names = doc.GetColumnNames();
-        Logger::debug("CSV has {} columns", column_names.size());
-
-        // Get row count
-        size_t row_count = doc.GetRowCount();
-        Logger::info("CSV has {} rows", row_count);
-
-        result.total_rows = static_cast<int>(row_count);
-
-        // Parse each row
-        for (size_t i = 0; i < row_count; ++i) {
-            // Build row map
-            std::map<std::string, std::string> row_map;
-            for (const auto& col_name : column_names) {
-                try {
-                    std::string value = doc.GetCell<std::string>(col_name, i);
-                    row_map[col_name] = value;
-                } catch (...) {
-                    row_map[col_name] = "";
+        while (std::getline(ss, line)) {
+            // IBKR Flex CSVs quote headers: "ClientAccountID",...
+            // Strip optional leading quote for section detection
+            auto stripped = line;
+            if (!stripped.empty() && stripped.front() == '"') {
+                stripped = stripped.substr(1);
+            }
+            if (stripped.rfind("ClientAccountID", 0) == 0) {
+                if (!section_lines.empty()) {
+                    sections.push_back(section_lines);
+                    section_lines.clear();
                 }
             }
+            section_lines.push_back(line);
+        }
+        if (!section_lines.empty()) {
+            sections.push_back(section_lines);
+        }
 
-            // Skip duplicate header rows (IBKR Flex reports can repeat headers mid-file)
-            {
-                auto it = row_map.find("UnderlyingSymbol");
-                if (it != row_map.end() && it->second == "UnderlyingSymbol") {
+        Logger::info("CSV has {} sections", sections.size());
+
+        for (size_t section_idx = 0; section_idx < sections.size(); ++section_idx) {
+            const auto& section = sections[section_idx];
+            if (section.empty()) continue;
+
+            std::stringstream section_ss;
+            for (const auto& sec_line : section) {
+                section_ss << sec_line << "\n";
+            }
+
+            rapidcsv::Document doc(section_ss, rapidcsv::LabelParams(0, -1));
+            std::vector<std::string> column_names = doc.GetColumnNames();
+            size_t row_count = doc.GetRowCount();
+
+            Logger::debug("Section {} has {} columns, {} rows", section_idx, column_names.size(), row_count);
+            result.total_rows += static_cast<int>(row_count);
+
+            bool has_trade_columns = false;
+            bool has_position_columns = false;
+            for (const auto& col : column_names) {
+                if (col == "TradeDate" || col == "TradePrice") has_trade_columns = true;
+                if (col == "MarkPrice") has_position_columns = true;
+            }
+
+            Logger::info("Section {} type: trade={}, position={}, columns: [{}]",
+                         section_idx, has_trade_columns, has_position_columns,
+                         fmt::join(column_names, ", "));
+
+            for (size_t i = 0; i < row_count; ++i) {
+                std::map<std::string, std::string> row_map;
+                for (const auto& col_name : column_names) {
+                    try {
+                        row_map[col_name] = doc.GetCell<std::string>(col_name, i);
+                    } catch (...) {
+                        row_map[col_name] = "";
+                    }
+                }
+
+                bool is_option = is_option_row(row_map);
+
+                if (filter_options_only && !is_option) {
                     result.skipped_rows++;
+                    result.non_option_rows++;
                     continue;
                 }
-            }
 
-            // Check if this is an option row
-            bool is_option = is_option_row(row_map);
-
-            if (filter_options_only && !is_option) {
-                result.skipped_rows++;
-                result.non_option_rows++;
-                continue;
-            }
-
-            if (is_option) {
-                result.option_rows++;
-            } else {
-                result.non_option_rows++;
-            }
-
-            // Skip trade execution rows (they have LevelOfDetail = EXECUTION)
-            // These are trade history, not open positions
-            std::string level_of_detail = get_column(row_map, "LevelOfDetail");
-            if (level_of_detail == "EXECUTION") {
-                Logger::debug("Skipping trade execution row for: {}", get_column(row_map, "Symbol"));
-                result.skipped_rows++;
-                continue;
-            }
-
-            // Also skip rows where Quantity looks like a date (> 1000)
-            // This catches any malformed data that slipped through
-            double quantity = parse_double(get_column(row_map, "Quantity"));
-            if (std::abs(quantity) > 10000) {
-                Logger::debug("Skipping row with invalid quantity: {} (quantity={})",
-                             get_column(row_map, "Symbol"), quantity);
-                result.skipped_rows++;
-                continue;
-            }
-
-            // Try to parse as open position (has MarkPrice, PositionValue)
-            if (row_map.count("MarkPrice") && !row_map["MarkPrice"].empty()) {
-                auto pos_result = parse_position_row(row_map);
-                if (pos_result) {
-                    // Check if expired
-                    if (filter_non_expired && pos_result->option_details) {
-                        if (OptionSymbolParser::is_expired(pos_result->option_details->expiry)) {
-                            Logger::debug("Skipping expired option: {} (expiry: {})",
-                                        pos_result->symbol, pos_result->option_details->expiry);
-                            result.skipped_rows++;
-                            continue;
-                        }
-                    }
-                    result.open_positions.push_back(*pos_result);
+                if (is_option) {
+                    result.option_rows++;
                 } else {
-                    Logger::warn("Failed to parse position row {}: {}", i, pos_result.error().message);
+                    result.non_option_rows++;
                 }
-            }
-            // Try to parse as trade (has TradeDate, TradePrice)
-            else if (row_map.count("TradeDate") && !row_map["TradeDate"].empty()) {
-                auto trade_result = parse_trade_row(row_map);
-                if (trade_result) {
-                    // Check if expired
-                    if (filter_non_expired && trade_result->option_details) {
-                        if (OptionSymbolParser::is_expired(trade_result->option_details->expiry)) {
-                            Logger::debug("Skipping expired option trade: {} (expiry: {})",
-                                        trade_result->symbol, trade_result->option_details->expiry);
-                            result.skipped_rows++;
-                            continue;
-                        }
+
+                // Trade section: has TradeDate/TradePrice with data
+                bool has_trade_data = has_trade_columns
+                    && row_map.count("TradeDate") && !row_map["TradeDate"].empty()
+                    && row_map.count("TradePrice") && !row_map["TradePrice"].empty();
+
+                if (has_trade_data) {
+                    auto trade_result = parse_trade_row(row_map);
+                    if (trade_result) {
+                        // Import ALL trades regardless of expiry status.
+                        // Trade matching needs historical closing trades for expired options.
+                        result.trades.push_back(*trade_result);
+                    } else {
+                        Logger::warn("Failed to parse trade row {}: {}", i, trade_result.error().message);
                     }
-                    result.trades.push_back(*trade_result);
-                } else {
-                    Logger::warn("Failed to parse trade row {}: {}", i, trade_result.error().message);
+                }
+                // Position section: has MarkPrice with data
+                else if (has_position_columns && row_map.count("MarkPrice") && !row_map["MarkPrice"].empty()) {
+                    auto pos_result = parse_position_row(row_map);
+                    if (pos_result) {
+                        if (filter_non_expired && pos_result->option_details) {
+                            if (OptionSymbolParser::is_expired(pos_result->option_details->expiry)) {
+                                Logger::debug("Skipping expired option: {} (expiry: {})",
+                                            pos_result->symbol, pos_result->option_details->expiry);
+                                result.skipped_rows++;
+                                continue;
+                            }
+                        }
+                        result.open_positions.push_back(*pos_result);
+                    } else {
+                        Logger::warn("Failed to parse position row {}: {}", i, pos_result.error().message);
+                    }
                 }
             }
         }
@@ -191,6 +198,10 @@ Result<TradeRecord> CSVParser::parse_trade_row(
     trade.proceeds = parse_double(get_column(row, "Proceeds"));
     trade.commission = parse_double(get_column(row, "Commission"));
     trade.net_cash = parse_double(get_column(row, "NetCash"));
+    trade.multiplier = parse_double(get_column(row, "Multiplier"));
+    trade.fifo_pnl_realized = parse_double(get_column(row, "FifoPnlRealized"));
+    trade.close_price = parse_double(get_column(row, "ClosePrice"));
+    trade.notes_codes = get_column(row, "Notes/Codes");
     trade.asset_class = get_column(row, "AssetClass");
 
     // Try to parse option details from symbol, fall back to CSV columns

@@ -218,6 +218,8 @@ public:
         const std::string& date1,
         const std::string& date2);
 
+    [[nodiscard]] utils::Result<int> dedup_trades(int64_t account_id = 0);
+
     /**
      * Check if database is initialized.
      */

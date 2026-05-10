@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS trades (
     proceeds REAL,
     commission REAL,
     net_cash REAL,
+    multiplier REAL DEFAULT 100,
+    fifo_pnl_realized REAL DEFAULT 0,
+    close_price REAL DEFAULT 0,
+    notes_codes TEXT DEFAULT '',
     imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
@@ -197,7 +201,7 @@ CREATE TABLE IF NOT EXISTS round_trips (
     commission REAL NOT NULL DEFAULT 0.0,
     realized_pnl REAL NOT NULL,
     close_reason TEXT NOT NULL CHECK(close_reason IN ('closed', 'expired', 'assigned', 'rolled', 'exercised')),
-    match_method TEXT NOT NULL CHECK(match_method IN ('trade_match', 'snapshot', 'manual')),
+    match_method TEXT NOT NULL CHECK(match_method IN ('trade_match', 'snapshot', 'manual', 'single_trade')),
     strategy_type TEXT,
     strategy_group_id INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

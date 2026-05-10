@@ -6,6 +6,7 @@
 #include "commands/import_command.hpp"
 #include "commands/analyze_command.hpp"
 #include "commands/report_command.hpp"
+#include "commands/trades_command.hpp"
 #include <iostream>
 #include <cstdlib>
 
@@ -63,21 +64,9 @@ int main(int argc, char** argv) {
     std::string analyze_type;
     std::string analyze_account;
     std::string analyze_underlying;
-    bool analyze_cache_only = false;
-    double analyze_min_iv_percentile = -1;
-    double analyze_min_premium_yield = -1;
-    int analyze_min_dte = -1;
-    int analyze_max_dte = -1;
-    double analyze_otm_buffer = -1;
     analyze_cmd->add_option("type", analyze_type, "Analysis type (open|impact|strategy|portfolio|screener)")->required();
     analyze_cmd->add_option("--account", analyze_account, "Filter by account");
     analyze_cmd->add_option("--underlying", analyze_underlying, "Filter by underlying");
-    analyze_cmd->add_flag("--cache-only", analyze_cache_only, "Use cached data only (no API fetch, screener only)");
-    analyze_cmd->add_option("--min-iv-percentile", analyze_min_iv_percentile, "Override screener min_iv_percentile")->check(CLI::Range(0.0, 100.0));
-    analyze_cmd->add_option("--min-premium-yield", analyze_min_premium_yield, "Override screener min_premium_yield")->check(CLI::PositiveNumber);
-    analyze_cmd->add_option("--min-dte", analyze_min_dte, "Override screener min_dte")->check(CLI::PositiveNumber);
-    analyze_cmd->add_option("--max-dte", analyze_max_dte, "Override screener max_dte")->check(CLI::PositiveNumber);
-    analyze_cmd->add_option("--otm-buffer", analyze_otm_buffer, "Override screener otm_buffer_percent")->check(CLI::NonNegativeNumber);
 
     // Report subcommand
     auto* report_cmd = app.add_subcommand("report", "Generate comprehensive report");
@@ -90,6 +79,21 @@ int main(int argc, char** argv) {
         ->default_val("full");
     report_cmd->add_option("--account", report_account, "Filter by account");
     report_cmd->add_option("--underlying", report_underlying, "Filter by underlying");
+
+    // Trades subcommand
+    auto* trades_cmd = app.add_subcommand("trades", "Analyze completed trade round-trips");
+    bool trades_rebuild = false;
+    std::string trades_date_from;
+    std::string trades_date_to;
+    std::string trades_strategy;
+    std::string trades_underlying;
+    std::string trades_account;
+    trades_cmd->add_flag("--rebuild", trades_rebuild, "Clear round_trips and re-match all trades");
+    trades_cmd->add_option("--date-from", trades_date_from, "Filter trades from this date (YYYY-MM-DD)");
+    trades_cmd->add_option("--date-to", trades_date_to, "Filter trades to this date (YYYY-MM-DD)");
+    trades_cmd->add_option("--strategy", trades_strategy, "Filter by strategy type");
+    trades_cmd->add_option("--underlying", trades_underlying, "Filter by underlying symbol");
+    trades_cmd->add_option("--account", trades_account, "Filter by account name");
 
     // Parse command line
     CLI11_PARSE(app, argc, argv);
@@ -186,21 +190,12 @@ int main(int argc, char** argv) {
             }
 
         } else if (*analyze_cmd) {
-            ibkr::commands::ScreenerOverrides screener_overrides;
-            screener_overrides.min_iv_percentile = analyze_min_iv_percentile;
-            screener_overrides.min_premium_yield = analyze_min_premium_yield;
-            screener_overrides.min_dte = analyze_min_dte;
-            screener_overrides.max_dte = analyze_max_dte;
-            screener_overrides.otm_buffer_percent = analyze_otm_buffer;
-
             auto result = ibkr::commands::AnalyzeCommand::execute(
                 config,
                 analyze_type,
                 analyze_account,
                 analyze_underlying,
-                output_opts,
-                analyze_cache_only,
-                screener_overrides
+                output_opts
             );
 
             if (!result) {
@@ -229,6 +224,20 @@ int main(int argc, char** argv) {
                     std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
                 } else {
                     ibkr::utils::Logger::error("Report failed: {}", result.error().format());
+                    std::cerr << "Error: " << result.error().format() << "\n";
+                }
+                ibkr::utils::Logger::shutdown();
+                return EXIT_FAILURE;
+            }
+        } else if (*trades_cmd) {
+            auto result = ibkr::commands::TradesCommand::execute(
+                config, trades_rebuild, trades_date_from, trades_date_to,
+                trades_strategy, trades_underlying, trades_account, output_opts);
+            if (!result) {
+                if (output_opts.json) {
+                    std::cout << ibkr::utils::JsonOutput::error(result.error().format()) << "\n";
+                } else {
+                    ibkr::utils::Logger::error("Trades failed: {}", result.error().format());
                     std::cerr << "Error: " << result.error().format() << "\n";
                 }
                 ibkr::utils::Logger::shutdown();

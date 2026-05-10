@@ -1,5 +1,6 @@
 #include "database.hpp"
 #include "utils/logger.hpp"
+#include "utils/currency.hpp"
 #include "config/config_manager.hpp"
 #include <filesystem>
 
@@ -51,11 +52,39 @@ Result<void> Database::initialize() {
             }
         } catch (const SQLite::Exception&) {
             // Column doesn't exist — Statement constructor threw
-            Logger::info("Running migration: adding multiplier column");
+            Logger::info("Running migration: adding multiplier column to open_options");
             try {
                 db_->exec("ALTER TABLE open_options ADD COLUMN multiplier REAL NOT NULL DEFAULT 100.0");
             } catch (const std::exception& e) {
                 return Error{"Failed to add multiplier column", std::string(e.what())};
+            }
+        }
+
+        // Migration: add multiplier and fifo_pnl_realized to trades
+        try {
+            SQLite::Statement check(*db_, "SELECT multiplier FROM trades LIMIT 1");
+            try { check.executeStep(); } catch (const SQLite::Exception&) {}
+        } catch (const SQLite::Exception&) {
+            Logger::info("Running migration: adding multiplier/fifo_pnl_realized to trades");
+            try {
+                db_->exec("ALTER TABLE trades ADD COLUMN multiplier REAL NOT NULL DEFAULT 100.0");
+                db_->exec("ALTER TABLE trades ADD COLUMN fifo_pnl_realized REAL NOT NULL DEFAULT 0.0");
+            } catch (const std::exception& e) {
+                return Error{"Failed to add trade columns", std::string(e.what())};
+            }
+        }
+
+        // Migration: add close_price and notes_codes to trades
+        try {
+            SQLite::Statement check(*db_, "SELECT close_price FROM trades LIMIT 1");
+            try { check.executeStep(); } catch (const SQLite::Exception&) {}
+        } catch (const SQLite::Exception&) {
+            Logger::info("Running migration: adding close_price/notes_codes to trades");
+            try {
+                db_->exec("ALTER TABLE trades ADD COLUMN close_price REAL NOT NULL DEFAULT 0.0");
+                db_->exec("ALTER TABLE trades ADD COLUMN notes_codes TEXT NOT NULL DEFAULT ''");
+            } catch (const std::exception& e) {
+                return Error{"Failed to add close_price/notes_codes", std::string(e.what())};
             }
         }
 
@@ -155,16 +184,36 @@ Result<void> Database::import_trades(
         // Begin transaction
         SQLite::Transaction transaction(*db_);
 
+        SQLite::Statement check(*db_,
+            "SELECT 1 FROM trades WHERE account_id = ? AND trade_date = ? "
+            "AND symbol = ? AND quantity = ? AND trade_price = ? AND commission = ? "
+            "LIMIT 1");
+
         SQLite::Statement insert(*db_,
             "INSERT INTO trades (account_id, trade_date, symbol, underlying, expiry, "
-            "strike, right, quantity, trade_price, proceeds, commission, net_cash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            "strike, right, quantity, trade_price, proceeds, commission, net_cash, "
+            "multiplier, fifo_pnl_realized, close_price, notes_codes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 
         int imported = 0;
+        int skipped = 0;
         for (const auto& trade : trades) {
             // Skip non-option trades (no option details)
             if (!trade.option_details) {
                 Logger::debug("Skipping non-option trade: {}", trade.symbol);
+                continue;
+            }
+
+            // Check for existing duplicate
+            check.reset();
+            check.bind(1, account_id);
+            check.bind(2, trade.trade_date);
+            check.bind(3, trade.symbol);
+            check.bind(4, trade.quantity);
+            check.bind(5, trade.trade_price);
+            check.bind(6, trade.commission);
+            if (check.executeStep()) {
+                skipped++;
                 continue;
             }
 
@@ -181,6 +230,10 @@ Result<void> Database::import_trades(
             insert.bind(10, trade.proceeds);
             insert.bind(11, trade.commission);
             insert.bind(12, trade.net_cash);
+            insert.bind(13, trade.multiplier);
+            insert.bind(14, trade.fifo_pnl_realized);
+            insert.bind(15, trade.close_price);
+            insert.bind(16, trade.notes_codes);
 
             insert.exec();
             imported++;
@@ -188,7 +241,8 @@ Result<void> Database::import_trades(
 
         transaction.commit();
 
-        Logger::info("Imported {} trades successfully", imported);
+        Logger::info("Imported {} trades ({} duplicates skipped) for account: {}",
+            imported, skipped, account_name);
         return Result<void>{};
 
     } catch (const std::exception& e) {
@@ -473,6 +527,7 @@ Result<std::vector<analysis::Position>> Database::get_all_positions(
             p.is_manual = q.getColumn(10).getInt() == 1;
             p.multiplier = q.getColumn(11).getDouble();
             if (p.multiplier == 0.0) p.multiplier = 100.0;
+            if (p.currency.empty()) p.currency = utils::deduce_currency(p.underlying);
             result.push_back(p);
         }
         return result;
@@ -709,6 +764,34 @@ Result<void> Database::clear_round_trips(int64_t account_id) {
         return Result<void>{};
     } catch (const std::exception& e) {
         return Error{"Failed to clear round trips", std::string(e.what())};
+    }
+}
+
+Result<int> Database::dedup_trades(int64_t account_id) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        int deleted;
+        if (account_id > 0) {
+            SQLite::Statement q(*db_,
+                "DELETE FROM trades WHERE account_id = ? AND id NOT IN ("
+                "SELECT MIN(id) FROM trades WHERE account_id = ? "
+                "GROUP BY trade_date, symbol, quantity, trade_price, commission)");
+            q.bind(1, account_id);
+            q.bind(2, account_id);
+            q.exec();
+            deleted = db_->getChanges();
+        } else {
+            deleted = db_->exec(
+                "DELETE FROM trades WHERE id NOT IN ("
+                "SELECT MIN(id) FROM trades "
+                "GROUP BY account_id, trade_date, symbol, quantity, trade_price, commission)");
+        }
+        if (deleted > 0) {
+            Logger::info("Deduplicated trades: removed {} duplicates", deleted);
+        }
+        return deleted;
+    } catch (const std::exception& e) {
+        return Error{"Failed to dedup trades", std::string(e.what())};
     }
 }
 

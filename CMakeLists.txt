@@ -154,6 +154,12 @@ add_library(ibkr_core STATIC
     src/core/services/portfolio_service.hpp
     src/core/services/screener_service.cpp
     src/core/services/screener_service.hpp
+    src/core/services/snapshot_service.cpp
+    src/core/services/snapshot_service.hpp
+    src/core/services/trade_matcher.cpp
+    src/core/services/trade_matcher.hpp
+    src/core/services/trade_analytics_service.cpp
+    src/core/services/trade_analytics_service.hpp
 )
 
 target_include_directories(ibkr_core PUBLIC
@@ -182,6 +188,8 @@ add_executable(ibkr-options-analyzer
     src/cli/commands/analyze_command.hpp
     src/cli/commands/report_command.cpp
     src/cli/commands/report_command.hpp
+    src/cli/commands/trades_command.cpp
+    src/cli/commands/trades_command.hpp
 )
 
 # Compiler warnings — target-only to avoid propagating -Werror to dependencies

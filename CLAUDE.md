@@ -65,7 +65,7 @@ cmake --build build/release
 - `src/core/parsers/`: Parse IBKR option symbols and CSV reports
 - `src/core/db/`: SQLite schema and CRUD operations
 - `src/core/analysis/`: Strategy detection and risk calculations
-- `src/core/services/`: Business logic orchestration (FlexService, ImportService, PositionService, PriceService, PriceCacheService, StrategyService, PortfolioService, ScreenerService, ReportService)
+- `src/core/services/`: Business logic orchestration (FlexService, ImportService, PositionService, PriceService, StrategyService, PortfolioService, ScreenerService, ReportService)
 - `src/core/report/`: Report generation and CSV export
 - `src/core/utils/`: Logger, HTTP client, JSON output, Result type
 - `src/cli/commands/`: CLI command handlers (thin wrappers)
@@ -177,26 +177,15 @@ cmake --build build/debug --target test
 ### Dashboard (Phase 5)
 - Web dashboard with Dash/Plotly frontend at `dashboard/`
 - Account management UI with DB storage
-- Positions tab: expiry timeline chart + table, exposure table, risk distribution
-- Portfolio tab: assignment risk alerts, position details, loss scenarios, expiration calendar
-- Screener tab: put-selling opportunity scanner with parameter overrides and cache-only mode
+- Portfolio and Screener tabs for position analysis
 - Run: `cd dashboard && uvicorn app.main:app --reload --port 8001`
 
 ### Analysis Services (Phase 5-6)
 - Option chain fetching via Yahoo Finance v7/v8 API
 - Synthetic option chain generation using Black-Scholes (when Yahoo blocked)
-- ScreenerService: watchlist-based opportunity screening with grading
+- ScreenerService: watchlist-based opportunity screening
 - PortfolioService: consolidated portfolio view construction
 - Multi-currency support with automatic symbol-to-currency deduction
-- Screener parameter overrides via CLI flags (--min-iv-percentile, --min-premium-yield, --min-dte, --max-dte, --otm-buffer)
-- Cache-only mode (--cache-only) for screener re-runs without API fetches
-
-### Price/Option Caching (Phase 7)
-- PriceCacheService: SQLite-backed caching for prices, volatility, and option chains
-- Trading-day-based TTL: cached data valid for current trading day only
-- Automatic expired cache cleanup on PriceService startup
-- US market holiday awareness (2025-2027) for trading date calculation
-- Cache tables: cached_prices, cached_volatility, cached_option_chains (schema v1.1.0)
 
 ## Future Enhancements
 
@@ -206,7 +195,6 @@ cmake --build build/debug --target test
 - Email/Slack alerts for risk thresholds
 - Backtesting framework
 - Tax reporting (wash sales, P&L)
-- Unit test framework
 
 ## Resources
 
