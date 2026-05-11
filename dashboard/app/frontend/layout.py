@@ -474,13 +474,14 @@ def _trade_review_tab() -> dbc.Tab:
                 className="mb-4",
             ),
 
-            # Sub-tabs: Trades, Strategy Analysis, Loss Review
+            # Sub-tabs: Trades, Strategy Analysis, Loss Review, Optimal Premium
             dbc.Tabs(
                 id="trade-subtabs",
                 children=[
                     dbc.Tab(label="Trades", tab_id="subtab-trades"),
                     dbc.Tab(label="Strategy Analysis", tab_id="subtab-strategy"),
                     dbc.Tab(label="Loss Review", tab_id="subtab-loss"),
+                    dbc.Tab(label="Optimal Premium", tab_id="subtab-optimal-premium"),
                 ],
                 active_tab="subtab-trades",
                 className="mb-3",
@@ -532,45 +533,7 @@ def _trade_review_tab() -> dbc.Tab:
                         css=[{"selector": ".dash-spreadsheet", "rule": "font-family: monospace"}],
                     ),
                     html.H6("Assigned Stock Positions", className="mt-4 mb-2", style={"color": "#f8fafc"}),
-                    dash_table.DataTable(
-                        id="tr-stock-table",
-                        columns=[
-                            {"name": "Account", "id": "account"},
-                            {"name": "Underlying", "id": "underlying"},
-                            {"name": "Right", "id": "right"},
-                            {"name": "Strike", "id": "strike", "type": "numeric"},
-                            {"name": "Shares", "id": "assigned_shares", "type": "numeric"},
-                            {"name": "Assigned", "id": "close_date"},
-                            {"name": "Current", "id": "current_price", "type": "numeric"},
-                            {"name": "Stock P&L", "id": "assigned_stock_pnl", "type": "numeric"},
-                            {"name": "Option P&L", "id": "realized_pnl", "type": "numeric"},
-                            {"name": "Net P&L", "id": "net_pnl", "type": "numeric"},
-                        ],
-                        data=[],
-                        sort_action="native",
-                        sort_by=[{"column_id": "close_date", "direction": "desc"}],
-                        style_header={
-                            "backgroundColor": BG_CARD,
-                            "color": "#f8fafc",
-                            "fontWeight": "bold",
-                            "border": "1px solid #334155",
-                        },
-                        style_cell={
-                            "backgroundColor": BG_CARD,
-                            "color": "#f8fafc",
-                            "border": "1px solid #334155",
-                            "textAlign": "center",
-                        },
-                        style_cell_conditional=[
-                            {"if": {"column_id": "account"}, "textAlign": "left"},
-                            {"if": {"column_id": "underlying"}, "textAlign": "left"},
-                        ],
-                        style_data_conditional=[
-                            {"if": {"row_index": "odd"}, "backgroundColor": "#253449"},
-                        ],
-                        page_size=15,
-                        css=[{"selector": ".dash-spreadsheet", "rule": "font-family: monospace"}],
-                    ),
+                    html.Div(id="tr-stock-table"),
                 ],
             ),
 
@@ -642,6 +605,128 @@ def _trade_review_tab() -> dbc.Tab:
                             ),
                         ],
                         className="mb-4",
+                    ),
+                ],
+            ),
+
+            # Optimal Premium Analysis sub-tab
+            html.Div(
+                id="tr-subtab-optimal-premium",
+                style={"display": "none"},
+                children=[
+                    dcc.Store(id="op-analysis-data", data={}),
+                    # Controls
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                dbc.Select(
+                                    id="op-dte-filter",
+                                    options=[
+                                        {"label": "All DTE", "value": "all"},
+                                        {"label": "DTE ≤ 7", "value": "7"},
+                                        {"label": "DTE ≤ 14", "value": "14"},
+                                        {"label": "DTE ≤ 30", "value": "30"},
+                                    ],
+                                    value="all",
+                                    style={"backgroundColor": BG_CARD, "color": "#f8fafc"},
+                                ),
+                                md=3,
+                            ),
+                            dbc.Col(
+                                dbc.Select(
+                                    id="op-right-filter",
+                                    options=[
+                                        {"label": "All", "value": "all"},
+                                        {"label": "Puts", "value": "P"},
+                                        {"label": "Calls", "value": "C"},
+                                    ],
+                                    value="all",
+                                    style={"backgroundColor": BG_CARD, "color": "#f8fafc"},
+                                ),
+                                md=3,
+                            ),
+                            dbc.Col(
+                                dbc.Select(
+                                    id="op-target-winrate",
+                                    options=[
+                                        {"label": "90% Win Rate", "value": "0.90"},
+                                        {"label": "85% Win Rate", "value": "0.85"},
+                                        {"label": "80% Win Rate", "value": "0.80"},
+                                        {"label": "75% Win Rate", "value": "0.75"},
+                                    ],
+                                    value="0.80",
+                                    style={"backgroundColor": BG_CARD, "color": "#f8fafc"},
+                                ),
+                                md=3,
+                            ),
+                        ],
+                        className="mb-3",
+                    ),
+                    # KPI cards
+                    dbc.Row(
+                        [
+                            dbc.Col(_summary_card("Max Prem (% of Strike)", "op-card-recommended-premium"), md=4),
+                            dbc.Col(_summary_card("Overall Win Rate", "op-card-overall-winrate"), md=4),
+                            dbc.Col(_summary_card("Trades Analyzed", "op-card-trades-analyzed"), md=4),
+                        ],
+                        className="mb-3",
+                    ),
+                    # Per-underlying table
+                    dbc.Card(
+                        dbc.CardBody(
+                            [
+                                html.H5("Per-Underlying Analysis", className="mb-3", style={"color": "#f8fafc"}),
+                                dash_table.DataTable(
+                                    id="op-underlying-table",
+                                    columns=[
+                                        {"name": "Underlying", "id": "underlying"},
+                                        {"name": "Right", "id": "right"},
+                                        {"name": "Trades", "id": "trade_count", "type": "numeric"},
+                                        {"name": "Assigned", "id": "assigned_count", "type": "numeric"},
+                                        {"name": "Win Rate", "id": "win_rate", "type": "numeric"},
+                                        {"name": "Max Prem % of Strike", "id": "max_safe_premium_pct", "type": "numeric"},
+                                        {"name": "Avg Win Prem", "id": "avg_win_premium", "type": "numeric"},
+                                        {"name": "Avg Assigned Prem", "id": "avg_assigned_premium", "type": "numeric"},
+                                    ],
+                                    data=[],
+                                    sort_action="native",
+                                    sort_by=[{"column_id": "trade_count", "direction": "desc"}],
+                                    style_header={
+                                        "backgroundColor": "#253449",
+                                        "color": "#f8fafc",
+                                        "fontWeight": "bold",
+                                        "border": "1px solid #334155",
+                                    },
+                                    style_cell={
+                                        "backgroundColor": BG_CARD,
+                                        "color": "#f8fafc",
+                                        "border": "1px solid #334155",
+                                        "textAlign": "center",
+                                        "fontSize": "0.85rem",
+                                    },
+                                    style_cell_conditional=[
+                                        {"if": {"column_id": "underlying"}, "textAlign": "left"},
+                                    ],
+                                    style_data_conditional=[
+                                        {"if": {"row_index": "odd"}, "backgroundColor": "#253449"},
+                                    ],
+                                    page_size=20,
+                                    css=[{"selector": ".dash-spreadsheet", "rule": "font-family: monospace"}],
+                                ),
+                            ]
+                        ),
+                        style={"backgroundColor": BG_CARD, "border": "none"},
+                        className="mb-3",
+                    ),
+                    # Scatter chart
+                    dbc.Card(
+                        dbc.CardBody(
+                            [
+                                html.H5("Premium vs Assignment Risk", className="mb-3", style={"color": "#f8fafc"}),
+                                dcc.Graph(id="op-premium-chart"),
+                            ]
+                        ),
+                        style={"backgroundColor": BG_CARD, "border": "none"},
                     ),
                 ],
             ),

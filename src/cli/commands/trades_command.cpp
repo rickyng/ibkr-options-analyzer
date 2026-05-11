@@ -103,6 +103,7 @@ Result<void> TradesCommand::execute(
                     {"right", std::string(1, rt.right)}, {"expiry", rt.expiry},
                     {"quantity", rt.quantity}, {"open_date", rt.open_date},
                     {"close_date", rt.close_date}, {"holding_days", rt.holding_days},
+                    {"open_price", rt.open_price}, {"commission", rt.commission},
                     {"net_premium", rt.net_premium}, {"realized_pnl", rt.realized_pnl},
                     {"roc", rt.roc}, {"annualized_return", rt.annualized_return},
                     {"close_reason", rt.close_reason}, {"strategy_type", rt.strategy_type}

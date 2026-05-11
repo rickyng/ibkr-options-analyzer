@@ -4,6 +4,7 @@ from collections import defaultdict, Counter
 from datetime import datetime, date
 
 import plotly.graph_objects as go
+import httpx
 from dash import Dash, Output, Input, State, html, no_update
 import dash_bootstrap_components as dbc
 
@@ -26,6 +27,25 @@ FX_RATES = {
 
 # Contract multiplier by market (JP options have multiplier of 1)
 CONTRACT_MULTIPLIER = {"US": 100, "HK": 100, "JP": 1}
+
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+
+
+def _fetch_price_yahoo(symbol: str) -> float | None:
+    """Fetch current price from Yahoo Finance (synchronous)."""
+    try:
+        with httpx.Client(timeout=5) as client:
+            resp = client.get(
+                YAHOO_CHART_URL.format(symbol=symbol),
+                params={"range": "1d", "interval": "1d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if resp.status_code == 200:
+                meta = resp.json()["chart"]["result"][0]["meta"]
+                return meta.get("regularMarketPrice")
+    except Exception:
+        pass
+    return None
 
 
 def _derive_currency_from_symbol(underlying: str) -> str:
@@ -148,6 +168,125 @@ def _rt_pnl(rt: dict) -> float:
     if "net_pnl" in rt:
         return rt["net_pnl"]
     return rt.get("realized_pnl", 0)
+
+
+def _compute_dte_at_entry(rt: dict) -> int | None:
+    """Compute DTE at entry from expiry and open_date fields."""
+    expiry = rt.get("expiry", "")
+    open_date = rt.get("open_date", "")
+    if not expiry or not open_date:
+        return None
+    try:
+        if len(open_date) == 8:
+            od = datetime.strptime(open_date, "%Y%m%d").date()
+        elif "-" in open_date:
+            od = datetime.strptime(open_date, "%Y-%m-%d").date()
+        else:
+            return None
+        ed = datetime.strptime(expiry, "%Y-%m-%d").date()
+        return (ed - od).days
+    except ValueError:
+        return None
+
+
+def _compute_optimal_premium(trips: list[dict], target_win_rate: float = 0.80) -> dict:
+    """Compute optimal premium analysis for a set of round trips.
+
+    Uses premium as % of strike as a proxy for moneyness (how close to ATM).
+    Higher premium % = closer to ATM = higher assignment risk.
+    Finds the max premium (as % of strike) that still meets the target win rate.
+    """
+    # Group by underlying + right
+    groups = defaultdict(list)
+    for rt in trips:
+        key = (rt.get("underlying", ""), rt.get("right", "P"))
+        strike = rt.get("strike", 0)
+        open_price = rt.get("open_price", 0)
+        if strike <= 0 or open_price <= 0:
+            continue
+
+        premium_pct = (open_price / strike) * 100
+        groups[key].append({
+            **rt,
+            "_premium_pct": premium_pct,
+        })
+
+    per_underlying = []
+    all_trades = []
+
+    for (underlying, right), group_trips in groups.items():
+        # Sort by premium_pct ascending (lowest premium = most OTM)
+        sorted_trades = sorted(group_trips, key=lambda t: t["_premium_pct"])
+        assigned_count = sum(1 for t in sorted_trades if t.get("close_reason") == "assigned")
+        total = len(sorted_trades)
+        win_rate = (total - assigned_count) / total if total > 0 else 0
+
+        win_premiums = [t["_premium_pct"] for t in sorted_trades if t.get("close_reason") != "assigned"]
+        assigned_premiums = [t["_premium_pct"] for t in sorted_trades if t.get("close_reason") == "assigned"]
+        win_dollar = [t.get("open_price", 0) for t in sorted_trades if t.get("close_reason") != "assigned"]
+        assigned_dollar = [t.get("open_price", 0) for t in sorted_trades if t.get("close_reason") == "assigned"]
+
+        avg_win_prem = sum(win_dollar) / len(win_dollar) if win_dollar else 0
+        avg_assigned_prem = sum(assigned_dollar) / len(assigned_dollar) if assigned_dollar else 0
+        avg_win_pct = sum(win_premiums) / len(win_premiums) if win_premiums else 0
+        avg_assigned_pct = sum(assigned_premiums) / len(assigned_premiums) if assigned_premiums else 0
+
+        # Walk from lowest premium upward, find max premium % that meets target win rate
+        max_safe_pct = None
+        cum_assigned = 0
+        for i, t in enumerate(sorted_trades):
+            if t.get("close_reason") == "assigned":
+                cum_assigned += 1
+            cum_win_rate = (i + 1 - cum_assigned) / (i + 1)
+            if cum_win_rate >= target_win_rate:
+                max_safe_pct = t["_premium_pct"]
+
+        per_underlying.append({
+            "underlying": underlying,
+            "right": right,
+            "trade_count": total,
+            "assigned_count": assigned_count,
+            "win_rate": win_rate,
+            "avg_win_premium": avg_win_prem,
+            "avg_assigned_premium": avg_assigned_prem if assigned_dollar else None,
+            "avg_win_pct": avg_win_pct,
+            "avg_assigned_pct": avg_assigned_pct if assigned_premiums else None,
+            "max_safe_premium_pct": max_safe_pct,
+            "low_confidence": total < 5,
+        })
+
+        for t in sorted_trades:
+            all_trades.append({
+                "underlying": underlying,
+                "premium_pct": t["_premium_pct"],
+                "open_price": t.get("open_price", 0),
+                "strike": t.get("strike", 0),
+                "is_assigned": t.get("close_reason") == "assigned",
+            })
+
+    # Aggregate: find max safe premium % across all trades
+    all_sorted = sorted(all_trades, key=lambda t: t["premium_pct"])
+    recommended_pct = None
+    cum_assigned = 0
+    for i, t in enumerate(all_sorted):
+        if t["is_assigned"]:
+            cum_assigned += 1
+        cum_win_rate = (i + 1 - cum_assigned) / (i + 1)
+        if cum_win_rate >= target_win_rate:
+            recommended_pct = t["premium_pct"]
+
+    total_trades = len(all_trades)
+    total_assigned = sum(1 for t in all_trades if t["is_assigned"])
+    overall_win_rate = (total_trades - total_assigned) / total_trades if total_trades > 0 else 0
+
+    return {
+        "per_underlying": per_underlying,
+        "aggregate_trades": all_trades,
+        "overall_win_rate": overall_win_rate,
+        "total_trades": total_trades,
+        "recommended_premium_pct": recommended_pct,
+        "target_win_rate": target_win_rate,
+    }
 
 
 def _flatten_calendar(calendar: dict) -> list:
@@ -1302,7 +1441,9 @@ def register_callbacks(app: Dash) -> None:
             if qty > 0 and op > 0:
                 rt["_multiplier"] = round(np_val / (qty * op))
             else:
-                rt["_multiplier"] = 100
+                # Fallback to market-based multiplier when derivation fails
+                market = _derive_market_from_symbol(rt.get("underlying", ""))
+                rt["_multiplier"] = CONTRACT_MULTIPLIER.get(market, 100)
 
         # Recalculate P&L for assigned trades: option P&L = premium only,
         # stock P&L = assignment exposure at current market price, net = sum.
@@ -1319,12 +1460,15 @@ def register_callbacks(app: Dash) -> None:
                 price_rows = []
             prices = {r["symbol"]: r["price"] for r in price_rows}
 
+            # Fetch missing prices from Yahoo Finance
+            missing = [s for s in underlyings if s not in prices]
+            for symbol in missing:
+                price = _fetch_price_yahoo(symbol)
+                if price is not None:
+                    prices[symbol] = price
+
             for rt in assigned:
                 underlying = rt.get("underlying", "")
-                current_price = prices.get(underlying)
-                if current_price is None:
-                    continue
-
                 strike = rt.get("strike", 0)
                 right = rt.get("right", "P")
                 qty = rt.get("quantity", 1)
@@ -1333,22 +1477,33 @@ def register_callbacks(app: Dash) -> None:
                 multiplier = rt.get("_multiplier", 100)
                 currency = _derive_currency_from_symbol(underlying)
 
-                # Option P&L is always just the premium received
+                # Option P&L is always just the premium received (regardless of current price)
                 option_pnl = qty * multiplier * open_price - commission
                 rt["realized_pnl"] = _convert_to_usd(option_pnl, currency)
                 rt["close_price"] = 0
 
-                # Stock P&L from assignment (compared to current market price)
-                # Short put assigned: bought stock at strike, P&L = (current - strike) × qty × mult
-                # Short call assigned: sold stock at strike, P&L = (strike - current) × qty × mult
-                if right == "P":
-                    stock_pnl = (current_price - strike) * qty * multiplier
+                # Stock P&L from assignment (only if current price available)
+                current_price = prices.get(underlying)
+                if current_price is not None:
+                    # Short put assigned: bought stock at strike, P&L = (current - strike) × qty × mult
+                    # Short call assigned: sold stock at strike, P&L = (strike - current) × qty × mult
+                    if right == "P":
+                        stock_pnl = (current_price - strike) * qty * multiplier
+                    else:
+                        stock_pnl = (strike - current_price) * qty * multiplier
+                    rt["assigned_stock_pnl"] = _convert_to_usd(stock_pnl, currency)
+                    rt["current_price"] = current_price
                 else:
-                    stock_pnl = (strike - current_price) * qty * multiplier
-                rt["assigned_stock_pnl"] = _convert_to_usd(stock_pnl, currency)
-                rt["net_pnl"] = rt["realized_pnl"] + rt["assigned_stock_pnl"]
+                    rt["assigned_stock_pnl"] = 0
+
+                # Net P&L = Option + Stock
+                rt["net_pnl"] = rt["realized_pnl"] + rt.get("assigned_stock_pnl", 0)
                 rt["assigned_shares"] = int(qty * multiplier)
-                rt["current_price"] = current_price
+
+                # Recalculate ROC using net_pnl / collateral
+                collateral = strike * qty * multiplier
+                if collateral > 0:
+                    rt["roc"] = (rt["net_pnl"] / collateral) * 100
 
         # Convert remaining P&L values to USD
         for rt in trips:
@@ -1364,30 +1519,45 @@ def register_callbacks(app: Dash) -> None:
 
         # Recompute overview from converted round-trips
         if trips:
-            # For assigned trades, net_pnl includes option + stock P&L;
-            # for others, realized_pnl is the complete P&L.
+            # Assignment-based classification: non-assigned = win, assigned = loss
+            non_assigned = [t for t in trips if t.get("close_reason") != "assigned"]
+            assigned_trips = [t for t in trips if t.get("close_reason") == "assigned"]
+
+            winning_trades = len(non_assigned)
+            losing_trades = len(assigned_trips)
+            win_rate = winning_trades / len(trips) if trips else 0
+
+            # Profit Factor: sum of non-assigned net_pnl / abs(sum of assigned net_pnl)
+            non_assigned_pnl = sum(_rt_pnl(t) for t in non_assigned)
+            assigned_pnl = sum(_rt_pnl(t) for t in assigned_trips)
+            if assigned_pnl != 0:
+                profit_factor = non_assigned_pnl / abs(assigned_pnl)
+            elif non_assigned_pnl > 0:
+                profit_factor = float("inf")
+            else:
+                profit_factor = 0
+
+            # Avg ROC: use recalculated roc field (net_pnl / collateral)
+            avg_roc = sum(t.get("roc", 0) for t in trips) / len(trips)
+
             pnls = [_rt_pnl(t) for t in trips]
-            wins = [p for p in pnls if p >= 0]
-            losses = [p for p in pnls if p < 0]
             total_pnl = sum(pnls)
-            total_wins = sum(wins)
-            total_losses = abs(sum(losses))
             holding_days = [t.get("holding_days", 0) for t in trips if t.get("holding_days")]
 
             data["overview"] = {
                 "total_trades": len(trips),
-                "winning_trades": len(wins),
-                "losing_trades": len(losses),
-                "win_rate": len(wins) / len(trips) if trips else 0,
+                "winning_trades": winning_trades,
+                "losing_trades": losing_trades,
+                "win_rate": win_rate,
                 "total_option_pnl": sum(t.get("realized_pnl", 0) for t in trips),
                 "total_stock_pnl": sum(t.get("assigned_stock_pnl", 0) for t in trips),
                 "total_pnl": total_pnl,
-                "avg_winner": total_wins / len(wins) if wins else 0,
-                "avg_loser": total_losses / len(losses) if losses else 0,
-                "profit_factor": total_wins / total_losses if total_losses else 0,
+                "avg_winner": non_assigned_pnl / winning_trades if winning_trades else 0,
+                "avg_loser": abs(assigned_pnl) / losing_trades if losing_trades else 0,
+                "profit_factor": profit_factor,
                 "expectancy": total_pnl / len(trips) if trips else 0,
                 "avg_holding_days": sum(holding_days) / len(holding_days) if holding_days else 0,
-                "avg_roc": sum(t.get("roc", 0) for t in trips) / len(trips),
+                "avg_roc": avg_roc,
                 "avg_annualized_return": sum(t.get("annualized_return", 0) for t in trips) / len(trips),
             }
 
@@ -1746,22 +1916,107 @@ def register_callbacks(app: Dash) -> None:
         return trips
 
     @app.callback(
-        Output("tr-stock-table", "data"),
+        Output("tr-stock-table", "children"),
         Input("tr-filtered-data", "data"),
     )
     def render_stock_table(data):
-        """Render assigned stock positions table."""
+        """Render assigned stock positions grouped by underlying with expandable details."""
         if not data:
-            return []
+            return html.P("No assigned positions", className="text-muted")
+
         trips = data.get("round_trips", [])
-        assigned = [rt for rt in trips if rt.get("close_reason") == "assigned" and "assigned_stock_pnl" in rt]
-        return assigned
+        assigned = [rt for rt in trips if rt.get("close_reason") == "assigned"]
+        if not assigned:
+            return html.P("No assigned positions", className="text-muted")
+
+        # Group by underlying
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for rt in assigned:
+            grouped[rt.get("underlying", "Unknown")].append(rt)
+
+        # Build accordion items
+        items = []
+        for underlying in sorted(grouped.keys()):
+            positions = grouped[underlying]
+
+            # Calculate totals for the group
+            total_shares = sum(p.get("assigned_shares", 0) for p in positions)
+            total_stock_pnl = sum(p.get("assigned_stock_pnl", 0) for p in positions)
+            total_option_pnl = sum(p.get("realized_pnl", 0) for p in positions)
+            total_net_pnl = sum(p.get("net_pnl", 0) for p in positions)
+
+            # Header row for the group
+            pnl_color = RISK_COLORS["SAFE"] if total_net_pnl >= 0 else RISK_COLORS["CRITICAL"]
+            header = html.Div([
+                html.Span(underlying, style={"fontWeight": "bold", "fontSize": "1rem"}),
+                html.Span(f" ({len(positions)} positions)", className="text-muted", style={"marginLeft": "8px"}),
+                html.Span(f"Shares: {total_shares:,}", style={"marginLeft": "20px", "fontSize": "0.9rem"}),
+                html.Span(f"Net P&L: ", style={"marginLeft": "20px", "fontSize": "0.9rem"}),
+                html.Span(f"${total_net_pnl:,.0f}", style={"color": pnl_color, "fontSize": "0.9rem", "fontWeight": "bold"}),
+            ], style={"display": "flex", "alignItems": "center"})
+
+            # Detail table rows
+            detail_rows = []
+            for i, p in enumerate(positions):
+                bg = BG_CARD if i % 2 == 0 else "#253449"
+                row_pnl = p.get("net_pnl", 0)
+                row_pnl_color = RISK_COLORS["SAFE"] if row_pnl >= 0 else RISK_COLORS["CRITICAL"]
+                stock_pnl = p.get("assigned_stock_pnl", 0)
+                stock_pnl_color = RISK_COLORS["SAFE"] if stock_pnl >= 0 else RISK_COLORS["CRITICAL"]
+
+                detail_rows.append(html.Tr([
+                    html.Td(p.get("account", ""), style={"backgroundColor": bg, "textAlign": "left"}),
+                    html.Td(f"{p.get('right', 'P')}", style={"backgroundColor": bg}),
+                    html.Td(f"{p.get('strike', 0):,.0f}", style={"backgroundColor": bg}),
+                    html.Td(f"{p.get('assigned_shares', 0):,}", style={"backgroundColor": bg}),
+                    html.Td(p.get("close_date", ""), style={"backgroundColor": bg}),
+                    html.Td(f"{p.get('current_price', 0):,.2f}" if p.get("current_price") else "—", style={"backgroundColor": bg}),
+                    html.Td(f"${stock_pnl:,.0f}", style={"backgroundColor": bg, "color": stock_pnl_color}),
+                    html.Td(f"${p.get('realized_pnl', 0):,.0f}", style={"backgroundColor": bg}),
+                    html.Td(f"${row_pnl:,.0f}", style={"backgroundColor": bg, "color": row_pnl_color, "fontWeight": "bold"}),
+                ]))
+
+            detail_table = dbc.Table(
+                [
+                    html.Thead(html.Tr([
+                        html.Th("Account", style={"textAlign": "left", "backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Right", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Strike", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Shares", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Assigned", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Current", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Stock P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Option P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Net P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                    ])),
+                    html.Tbody(detail_rows),
+                ],
+                bordered=True,
+                className="mb-0",
+                style={"fontSize": "0.85rem"},
+            )
+
+            items.append(dbc.AccordionItem(
+                detail_table,
+                title=header,
+                item_id=underlying,
+            ))
+
+        return dbc.Accordion(
+            items,
+            always_open=True,
+            start_collapsed=True,
+            flush=True,
+            style={"backgroundColor": BG_CARD},
+        )
 
     @app.callback(
         [
             Output("tr-subtab-trades", "style"),
             Output("tr-subtab-strategy", "style"),
             Output("tr-subtab-loss", "style"),
+            Output("tr-subtab-optimal-premium", "style"),
         ],
         Input("trade-subtabs", "active_tab"),
     )
@@ -1770,12 +2025,14 @@ def register_callbacks(app: Dash) -> None:
         show = {"display": "block"}
         hide = {"display": "none"}
         if active_tab == "subtab-trades":
-            return show, hide, hide
+            return show, hide, hide, hide
         elif active_tab == "subtab-strategy":
-            return hide, show, hide
+            return hide, show, hide, hide
         elif active_tab == "subtab-loss":
-            return hide, hide, show
-        return show, hide, hide
+            return hide, hide, show, hide
+        elif active_tab == "subtab-optimal-premium":
+            return hide, hide, hide, show
+        return show, hide, hide, hide
 
     @app.callback(
         Output("tr-strategy-table", "children"),
@@ -1933,6 +2190,149 @@ def register_callbacks(app: Dash) -> None:
         ]
 
         return dbc.Row([dbc.Col(item, width=4) for item in items], className="g-2")
+
+    # --- Optimal Premium Analysis ---
+
+    @app.callback(
+        [
+            Output("op-underlying-table", "data"),
+            Output("op-analysis-data", "data"),
+            Output("op-card-recommended-premium", "children"),
+            Output("op-card-overall-winrate", "children"),
+            Output("op-card-trades-analyzed", "children"),
+        ],
+        [
+            Input("tr-filtered-data", "data"),
+            Input("op-dte-filter", "value"),
+            Input("op-right-filter", "value"),
+            Input("op-target-winrate", "value"),
+        ],
+    )
+    def update_optimal_premium_analysis(data, dte_filter, right_filter, target_wr):
+        """Compute and display optimal premium analysis."""
+        if not data:
+            return [], {}, "—", "—", "—"
+
+        trips = data.get("round_trips", [])
+        if not trips:
+            return [], {}, "—", "—", "—"
+
+        # Parse target win rate
+        try:
+            target_win_rate = float(target_wr)
+        except (TypeError, ValueError):
+            target_win_rate = 0.80
+
+        # Apply DTE filter
+        if dte_filter and dte_filter != "all":
+            max_dte = int(dte_filter)
+            trips = [rt for rt in trips if _compute_dte_at_entry(rt) is not None and _compute_dte_at_entry(rt) <= max_dte]
+
+        # Apply right filter
+        if right_filter and right_filter != "all":
+            trips = [rt for rt in trips if rt.get("right") == right_filter]
+
+        if not trips:
+            return [], {}, "—", "—", "—"
+
+        result = _compute_optimal_premium(trips, target_win_rate)
+
+        # Format table data
+        table_data = []
+        for row in result["per_underlying"]:
+            wr = row["win_rate"]
+            pct = row["max_safe_premium_pct"]
+            table_data.append({
+                "underlying": row["underlying"],
+                "right": row["right"],
+                "trade_count": row["trade_count"],
+                "assigned_count": row["assigned_count"],
+                "win_rate": f"{wr:.0%}" if row["trade_count"] >= 5 else f"{wr:.0%}*",
+                "max_safe_premium_pct": f"{pct:.2f}%" if pct is not None else "N/A",
+                "avg_win_premium": f"${row['avg_win_premium']:.2f}" if row["avg_win_premium"] else "—",
+                "avg_assigned_premium": f"${row['avg_assigned_premium']:.2f}" if row["avg_assigned_premium"] else "—",
+            })
+
+        # KPI cards
+        rec_pct = result["recommended_premium_pct"]
+        rec_display = f"{rec_pct:.2f}% of strike" if rec_pct is not None else "N/A"
+        wr_display = f"{result['overall_win_rate']:.0%}"
+        count_display = str(result["total_trades"])
+
+        return table_data, result, rec_display, wr_display, count_display
+
+    @app.callback(
+        Output("op-premium-chart", "figure"),
+        Input("op-analysis-data", "data"),
+    )
+    def update_optimal_premium_chart(analysis_data):
+        """Render premium-as-%-of-strike vs assignment risk scatter chart."""
+        if not analysis_data:
+            return go.Figure()
+
+        trades = analysis_data.get("aggregate_trades", [])
+        if not trades:
+            return go.Figure()
+
+        recommended_pct = analysis_data.get("recommended_premium_pct")
+
+        not_assigned = [(t["premium_pct"], t["underlying"], t["open_price"], t["strike"]) for t in trades if not t["is_assigned"]]
+        assigned = [(t["premium_pct"], t["underlying"], t["open_price"], t["strike"]) for t in trades if t["is_assigned"]]
+
+        fig = go.Figure()
+
+        # Not assigned trades (bottom)
+        if not_assigned:
+            fig.add_trace(go.Scatter(
+                x=[p for p, _, _, _ in not_assigned],
+                y=[0.1] * len(not_assigned),
+                mode="markers",
+                name="Not Assigned",
+                marker=dict(color=RISK_COLORS["SAFE"], size=8, opacity=0.6),
+                text=[f"{u}<br>Prem: ${op:.2f} / Strike: ${s:.0f}<br>{p:.2f}% of strike" for p, u, op, s in not_assigned],
+                hovertemplate="%{text}<extra></extra>",
+            ))
+
+        # Assigned trades (top)
+        if assigned:
+            fig.add_trace(go.Scatter(
+                x=[p for p, _, _, _ in assigned],
+                y=[0.9] * len(assigned),
+                mode="markers",
+                name="Assigned",
+                marker=dict(color=RISK_COLORS["CRITICAL"], size=8, opacity=0.6),
+                text=[f"{u}<br>Prem: ${op:.2f} / Strike: ${s:.0f}<br>{p:.2f}% of strike" for p, u, op, s in assigned],
+                hovertemplate="%{text}<extra></extra>",
+            ))
+
+        # Max safe premium % line
+        if recommended_pct is not None:
+            fig.add_vline(
+                x=recommended_pct,
+                line_dash="dash",
+                line_color="#fbbf24",
+                annotation_text=f"Max Safe: {recommended_pct:.2f}%",
+                annotation_position="top left",
+                annotation=dict(font_color="#fbbf24", font_size=12),
+            )
+
+        fig.update_layout(
+            xaxis_title="Premium as % of Strike",
+            yaxis=dict(
+                tickvals=[0.1, 0.9],
+                ticktext=["Not Assigned", "Assigned"],
+                range=[-0.2, 1.2],
+            ),
+            plot_bgcolor="#1e293b",
+            paper_bgcolor=BG_CARD,
+            font_color="#f8fafc",
+            height=400,
+            margin=dict(l=60, r=30, t=30, b=50),
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+
+        return fig
 
 
 def _detail_card(label: str, value: str) -> html.Div:

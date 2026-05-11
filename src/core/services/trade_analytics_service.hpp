@@ -33,6 +33,7 @@ struct RoundTripDisplay {
     std::string open_date;
     std::string close_date;
     int holding_days{0};
+    double open_price{0.0};
     double net_premium{0.0};
     double realized_pnl{0.0};
     double commission{0.0};

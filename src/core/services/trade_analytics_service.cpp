@@ -131,6 +131,7 @@ Result<std::vector<RoundTripDisplay>> TradeAnalyticsService::get_round_trips(
         d.open_date = rt.open_date;
         d.close_date = rt.close_date;
         d.holding_days = rt.holding_days;
+        d.open_price = rt.open_price;
         d.net_premium = rt.net_premium;
         d.realized_pnl = rt.realized_pnl;
         d.commission = rt.commission;
