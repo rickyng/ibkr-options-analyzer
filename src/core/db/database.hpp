@@ -218,6 +218,36 @@ public:
         const std::string& date1,
         const std::string& date2);
 
+    // --- Wheel Cycle Structures ---
+    struct WheelCycle {
+        int64_t id{0};
+        int64_t account_id{0};
+        std::string underlying;
+        int64_t put_round_trip_id{0};
+        std::optional<int64_t> call_round_trip_id;
+        double put_strike{0.0};
+        std::optional<double> call_strike;
+        int quantity{0};
+        int multiplier{100};
+        double put_premium{0.0};
+        std::optional<double> call_premium;
+        std::optional<double> stock_pnl;
+        double option_pnl{0.0};
+        double total_pnl{0.0};
+        std::string put_assigned_date;
+        std::string call_close_date;
+        std::string call_close_reason;
+        std::string cycle_status;  // 'stock_held', 'completed', 'incomplete'
+        std::string account_name;
+    };
+
+    // --- Wheel Cycle CRUD ---
+    [[nodiscard]] utils::Result<int64_t> insert_wheel_cycle(const WheelCycle& cycle);
+    [[nodiscard]] utils::Result<std::vector<WheelCycle>> get_wheel_cycles(
+        int64_t account_id = 0,
+        const std::string& underlying = "");
+    [[nodiscard]] utils::Result<void> clear_wheel_cycles(int64_t account_id = 0);
+
     [[nodiscard]] utils::Result<int> dedup_trades(int64_t account_id = 0);
 
     /**

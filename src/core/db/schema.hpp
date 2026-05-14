@@ -275,6 +275,38 @@ CREATE INDEX IF NOT EXISTS idx_position_snapshots_account_date ON position_snaps
 CREATE INDEX IF NOT EXISTS idx_position_snapshots_date ON position_snapshots(snapshot_date);
 )";
 
+// WheelCycles table: tracks put->stock->call wheel cycles
+constexpr const char* CREATE_WHEEL_CYCLES_TABLE = R"(
+CREATE TABLE IF NOT EXISTS wheel_cycles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    underlying TEXT NOT NULL,
+    put_round_trip_id INTEGER NOT NULL,
+    call_round_trip_id INTEGER,
+    put_strike REAL NOT NULL,
+    call_strike REAL,
+    quantity INTEGER NOT NULL,
+    multiplier INTEGER NOT NULL DEFAULT 100,
+    put_premium REAL NOT NULL,
+    call_premium REAL,
+    stock_pnl REAL,
+    option_pnl REAL,
+    total_pnl REAL,
+    put_assigned_date TEXT NOT NULL,
+    call_close_date TEXT,
+    call_close_reason TEXT,
+    cycle_status TEXT NOT NULL CHECK(cycle_status IN ('stock_held', 'completed', 'incomplete')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY (put_round_trip_id) REFERENCES round_trips(id) ON DELETE CASCADE,
+    FOREIGN KEY (call_round_trip_id) REFERENCES round_trips(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_wheel_cycles_account ON wheel_cycles(account_id);
+CREATE INDEX IF NOT EXISTS idx_wheel_cycles_underlying ON wheel_cycles(underlying);
+CREATE INDEX IF NOT EXISTS idx_wheel_cycles_status ON wheel_cycles(cycle_status);
+)";
+
 // All schema statements in order
 constexpr const char* ALL_SCHEMA_STATEMENTS[] = {
     CREATE_ACCOUNTS_TABLE,
@@ -289,7 +321,8 @@ constexpr const char* ALL_SCHEMA_STATEMENTS[] = {
     CREATE_ROUND_TRIPS_TABLE,
     CREATE_ROUND_TRIP_LEGS_TABLE,
     CREATE_STRATEGY_ROUND_TRIPS_TABLE,
-    CREATE_POSITION_SNAPSHOTS_TABLE
+    CREATE_POSITION_SNAPSHOTS_TABLE,
+    CREATE_WHEEL_CYCLES_TABLE
 };
 
 constexpr size_t SCHEMA_STATEMENT_COUNT = sizeof(ALL_SCHEMA_STATEMENTS) / sizeof(ALL_SCHEMA_STATEMENTS[0]);

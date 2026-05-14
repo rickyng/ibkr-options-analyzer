@@ -951,4 +951,144 @@ Result<std::vector<Database::PositionSnapshot>> Database::diff_snapshots(
     }
 }
 
+// --- Wheel Cycle CRUD ---
+
+Result<int64_t> Database::insert_wheel_cycle(const WheelCycle& cycle) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        SQLite::Statement q(*db_,
+            "INSERT INTO wheel_cycles "
+            "(account_id, underlying, put_round_trip_id, call_round_trip_id, "
+            "put_strike, call_strike, quantity, multiplier, put_premium, call_premium, "
+            "stock_pnl, option_pnl, total_pnl, put_assigned_date, call_close_date, "
+            "call_close_reason, cycle_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        q.bind(1, cycle.account_id);
+        q.bind(2, cycle.underlying);
+        q.bind(3, cycle.put_round_trip_id);
+        if (cycle.call_round_trip_id.has_value()) {
+            q.bind(4, *cycle.call_round_trip_id);
+        } else {
+            q.bind(4);
+        }
+        q.bind(5, cycle.put_strike);
+        if (cycle.call_strike.has_value()) {
+            q.bind(6, *cycle.call_strike);
+        } else {
+            q.bind(6);
+        }
+        q.bind(7, cycle.quantity);
+        q.bind(8, cycle.multiplier);
+        q.bind(9, cycle.put_premium);
+        if (cycle.call_premium.has_value()) {
+            q.bind(10, *cycle.call_premium);
+        } else {
+            q.bind(10);
+        }
+        if (cycle.stock_pnl.has_value()) {
+            q.bind(11, *cycle.stock_pnl);
+        } else {
+            q.bind(11);
+        }
+        q.bind(12, cycle.option_pnl);
+        q.bind(13, cycle.total_pnl);
+        q.bind(14, cycle.put_assigned_date);
+        if (!cycle.call_close_date.empty()) {
+            q.bind(15, cycle.call_close_date);
+        } else {
+            q.bind(15);
+        }
+        if (!cycle.call_close_reason.empty()) {
+            q.bind(16, cycle.call_close_reason);
+        } else {
+            q.bind(16);
+        }
+        q.bind(17, cycle.cycle_status);
+        q.exec();
+        int64_t id = db_->getLastInsertRowid();
+        Logger::debug("Inserted wheel_cycle id={} {} put_strike={} call_strike={}",
+                       id, cycle.underlying, cycle.put_strike,
+                       cycle.call_strike.value_or(0.0));
+        return id;
+    } catch (const std::exception& e) {
+        return Error{"Failed to insert wheel cycle", std::string(e.what())};
+    }
+}
+
+Result<std::vector<Database::WheelCycle>> Database::get_wheel_cycles(
+    int64_t account_id,
+    const std::string& underlying) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        std::string sql =
+            "SELECT w.id, w.account_id, w.underlying, w.put_round_trip_id, "
+            "w.call_round_trip_id, w.put_strike, w.call_strike, w.quantity, "
+            "w.multiplier, w.put_premium, w.call_premium, w.stock_pnl, "
+            "w.option_pnl, w.total_pnl, w.put_assigned_date, w.call_close_date, "
+            "w.call_close_reason, w.cycle_status, "
+            "COALESCE(a.name, '') as account_name "
+            "FROM wheel_cycles w "
+            "LEFT JOIN accounts a ON a.id = w.account_id WHERE 1=1";
+
+        if (account_id > 0) sql += " AND w.account_id = ?";
+        if (!underlying.empty()) sql += " AND w.underlying = ?";
+        sql += " ORDER BY w.put_assigned_date DESC";
+
+        SQLite::Statement q(*db_, sql);
+        int idx = 1;
+        if (account_id > 0) q.bind(idx++, account_id);
+        if (!underlying.empty()) q.bind(idx++, underlying);
+
+        std::vector<WheelCycle> result;
+        while (q.executeStep()) {
+            WheelCycle c;
+            c.id = q.getColumn(0).getInt64();
+            c.account_id = q.getColumn(1).getInt64();
+            c.underlying = q.getColumn(2).getString();
+            c.put_round_trip_id = q.getColumn(3).getInt64();
+            auto call_rt = q.getColumn(4);
+            if (!call_rt.isNull()) c.call_round_trip_id = call_rt.getInt64();
+            c.put_strike = q.getColumn(5).getDouble();
+            auto call_strike_col = q.getColumn(6);
+            if (!call_strike_col.isNull()) c.call_strike = call_strike_col.getDouble();
+            c.quantity = q.getColumn(7).getInt();
+            c.multiplier = q.getColumn(8).getInt();
+            c.put_premium = q.getColumn(9).getDouble();
+            auto call_prem = q.getColumn(10);
+            if (!call_prem.isNull()) c.call_premium = call_prem.getDouble();
+            auto stock_pnl_col = q.getColumn(11);
+            if (!stock_pnl_col.isNull()) c.stock_pnl = stock_pnl_col.getDouble();
+            c.option_pnl = q.getColumn(12).getDouble();
+            c.total_pnl = q.getColumn(13).getDouble();
+            c.put_assigned_date = q.getColumn(14).getString();
+            c.call_close_date = q.getColumn(15).isNull() ? "" : q.getColumn(15).getString();
+            c.call_close_reason = q.getColumn(16).isNull() ? "" : q.getColumn(16).getString();
+            c.cycle_status = q.getColumn(17).getString();
+            c.account_name = q.getColumn(18).getString();
+            result.push_back(c);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        return Error{"Failed to get wheel cycles", std::string(e.what())};
+    }
+}
+
+Result<void> Database::clear_wheel_cycles(int64_t account_id) {
+    if (!initialized_) return Error{"Database not initialized"};
+    try {
+        if (account_id > 0) {
+            SQLite::Statement q(*db_, "DELETE FROM wheel_cycles WHERE account_id = ?");
+            q.bind(1, account_id);
+            q.exec();
+            Logger::info("Cleared wheel cycles for account_id={}", account_id);
+        } else {
+            db_->exec("DELETE FROM wheel_cycles");
+            Logger::info("Cleared all wheel cycles");
+        }
+        return Result<void>{};
+    } catch (const std::exception& e) {
+        return Error{"Failed to clear wheel cycles", std::string(e.what())};
+    }
+}
+
 } // namespace ibkr::db
