@@ -92,9 +92,18 @@ __pycache__/
 .venv/
 dashboard/.venv/
 
+# Google Sheets API credentials
+google/
+credentials.json
+token.json
+
+# Generated reports
+reports/
+
 # Core dumps
 /core
 /core.*
 
 # Superpowers brainstorming sessions
 .superpowers/
+reports/

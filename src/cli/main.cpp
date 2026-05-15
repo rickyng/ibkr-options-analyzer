@@ -25,12 +25,14 @@
 int main(int argc, char** argv) {
     CLI::App app{"IBKR Options Analyzer - Track and analyze option positions"};
     app.require_subcommand(1);
+    app.fallthrough();
 
     // Global options
     std::string config_path;
     std::string log_level;
     std::string format;
     bool quiet = false;
+    bool google_sheet = false;
     app.add_option("--config", config_path, "Path to config.json")
         ->default_val("");
     app.add_option("--log-level", log_level, "Log level (trace|debug|info|warn|error)")
@@ -42,6 +44,7 @@ int main(int argc, char** argv) {
             return {};
         });
     app.add_flag("--quiet", quiet, "Suppress human-readable output (only JSON)");
+    app.add_flag("--google-sheet", google_sheet, "Push output to Google Sheets (creates new spreadsheet)");
 
     // Download subcommand
     auto* download_cmd = app.add_subcommand("download", "Download Flex reports from IBKR");
@@ -144,6 +147,7 @@ int main(int argc, char** argv) {
     ibkr::utils::OutputOptions output_opts;
     output_opts.json = (format == "json");
     output_opts.quiet = quiet;
+    output_opts.google_sheet = google_sheet;
 
     // Execute subcommand
     try {

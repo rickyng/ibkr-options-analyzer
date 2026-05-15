@@ -1,9 +1,11 @@
 #include "trades_command.hpp"
 #include "services/trade_matcher.hpp"
 #include "services/trade_analytics_service.hpp"
+#include "services/wheel_cycle_service.hpp"
 #include "services/snapshot_service.hpp"
 #include "db/database.hpp"
 #include "utils/logger.hpp"
+#include "utils/subprocess.hpp"
 #include <iostream>
 #include <iomanip>
 #include <nlohmann/json.hpp>
@@ -76,7 +78,7 @@ Result<void> TradesCommand::execute(
 
     const auto& overview = *overview_result;
 
-    if (output_opts.json) {
+    if (output_opts.json || output_opts.google_sheet) {
         json output;
         output["overview"] = {
             {"total_trades", overview.total_trades},
@@ -176,7 +178,67 @@ Result<void> TradesCommand::execute(
             };
         }
 
-        std::cout << output.dump(2) << "\n";
+        // Build wheel cycle data
+        services::WheelCycleService wheel_service(database);
+        auto build_result = wheel_service.build_wheel_cycles(account_id);
+        if (!build_result) {
+            Logger::warn("Failed to build wheel cycles: {}", build_result.error().message);
+        }
+
+        auto wheel_overview = wheel_service.get_wheel_overview(account_id, underlying);
+        if (wheel_overview) {
+            output["wheel_overview"] = {
+                {"total_option_pnl", wheel_overview->total_option_pnl},
+                {"total_stock_pnl", wheel_overview->total_stock_pnl},
+                {"total_wheel_pnl", wheel_overview->total_wheel_pnl},
+                {"completed_cycles", wheel_overview->completed_cycles},
+                {"stock_held_cycles", wheel_overview->stock_held_cycles},
+                {"incomplete_cycles", wheel_overview->incomplete_cycles}
+            };
+        }
+
+        auto wheel_cycles = wheel_service.get_wheel_cycles(account_id, underlying);
+        if (wheel_cycles) {
+            json wc_arr = json::array();
+            for (const auto& wc : *wheel_cycles) {
+                json wc_obj = {
+                    {"id", wc.id},
+                    {"account", wc.account_name},
+                    {"underlying", wc.underlying},
+                    {"put_strike", wc.put_strike},
+                    {"call_strike", wc.call_strike.value_or(0.0)},
+                    {"quantity", wc.quantity},
+                    {"multiplier", wc.multiplier},
+                    {"put_premium", wc.put_premium},
+                    {"call_premium", wc.call_premium.value_or(0.0)},
+                    {"stock_pnl", wc.stock_pnl.value_or(0.0)},
+                    {"option_pnl", wc.option_pnl},
+                    {"total_pnl", wc.total_pnl},
+                    {"put_assigned_date", wc.put_assigned_date},
+                    {"call_close_date", wc.call_close_date},
+                    {"call_close_reason", wc.call_close_reason},
+                    {"cycle_status", wc.cycle_status}
+                };
+                wc_arr.push_back(wc_obj);
+            }
+            output["wheel_cycles"] = wc_arr;
+        }
+
+        // Print JSON if requested
+        if (output_opts.json) {
+            std::cout << output.dump(2) << "\n";
+        }
+
+        // Push to Google Sheets if requested
+        if (output_opts.google_sheet) {
+            auto script_result = utils::run_script(
+                "scripts/sheets_exporter.py", {"trades"}, output.dump());
+            if (script_result) {
+                std::cout << "\nGoogle Sheet created: " << *script_result << "\n";
+            } else {
+                Logger::error("Google Sheets export failed: {}", script_result.error().format());
+            }
+        }
     } else {
         std::cout << "\n=== Trade Review Summary ===\n\n";
         std::cout << "Total Trades:    " << overview.total_trades << "\n";

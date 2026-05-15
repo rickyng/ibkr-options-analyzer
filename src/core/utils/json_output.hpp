@@ -19,6 +19,7 @@ namespace ibkr::utils {
 struct OutputOptions {
     bool json{false};       // Output in JSON format
     bool quiet{false};      // Suppress human-readable output (only JSON)
+    bool google_sheet{false}; // Push output to Google Sheets
 };
 
 /**
