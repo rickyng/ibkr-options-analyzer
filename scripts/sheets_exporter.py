@@ -44,6 +44,7 @@ NUMBER_FORMATS = {
 # ── Column Schemas (key columns first, matching UI) ─────────────
 
 TRADES_COLS = [
+    ("account", TEXT),
     ("underlying", TEXT),
     ("right", TEXT),
     ("strike", CURRENCY),
@@ -60,6 +61,7 @@ TRADES_COLS = [
 ]
 
 WHEEL_COLS = [
+    ("account", TEXT),
     ("underlying", TEXT),
     ("cycle_status", TEXT),
     ("total_pnl", CURRENCY, True),
@@ -72,7 +74,6 @@ WHEEL_COLS = [
     ("quantity", NUMBER),
     ("put_assigned_date", TEXT),
     ("call_close_date", TEXT),
-    ("account", TEXT),
 ]
 
 STRATEGY_COLS = [
@@ -99,6 +100,16 @@ UNDERLYING_COLS = [
     ("win_rate", PERCENT),
     ("total_pnl", CURRENCY, True),
     ("avg_pnl", CURRENCY),
+]
+
+ACCOUNT_COLS = [
+    ("account", TEXT),
+    ("trades", NUMBER),
+    ("winning", NUMBER),
+    ("win_rate", PERCENT),
+    ("option_pnl", CURRENCY, True),
+    ("stock_pnl", CURRENCY, True),
+    ("total_pnl", CURRENCY, True),
 ]
 
 
@@ -221,10 +232,10 @@ def create_tab(service: Any, sid: str, name: str, data: Any, columns: list, tota
     ).execute()
 
     # Apply formatting
-    apply_formatting(service, sid, sheet_id, columns, num_rows, totals)
+    apply_formatting(service, sid, sheet_id, columns, num_rows, num_cols, totals)
 
 
-def apply_formatting(service: Any, sid: str, sheet_id: int, columns: list, num_rows: int, has_totals: bool):
+def apply_formatting(service: Any, sid: str, sheet_id: int, columns: list, num_rows: int, num_cols: int, has_totals: bool):
     reqs = []
 
     # Frozen header
@@ -313,20 +324,77 @@ def apply_formatting(service: Any, sid: str, sheet_id: int, columns: list, num_r
             }
         })
 
+    # Auto-filter on header row
+    if num_rows > 2 and num_cols > 0:
+        reqs.append({
+            "setBasicFilter": {
+                "filter": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 0,
+                        "endRowIndex": num_rows,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": num_cols,
+                    }
+                }
+            }
+        })
+
     if reqs:
         service.spreadsheets().batchUpdate(spreadsheetId=sid, body={"requests": reqs}).execute()
 
 
 # ── Dashboard Tab (matches web UI cards) ────────────────────────
 
+def compute_account_breakdown(data: dict) -> list[dict]:
+    """Aggregate stats by account from round_trips and wheel_cycles."""
+    trips = data.get("round_trips", [])
+    cycles = data.get("wheel_cycles", [])
+
+    accounts = {}
+    for t in trips:
+        acc = t.get("account", "Unknown")
+        if acc not in accounts:
+            accounts[acc] = {"trades": 0, "winning": 0, "option_pnl": 0.0}
+        accounts[acc]["trades"] += 1
+        if t.get("realized_pnl", 0) > 0:
+            accounts[acc]["winning"] += 1
+        accounts[acc]["option_pnl"] += t.get("realized_pnl", 0) or 0
+
+    for c in cycles:
+        acc = c.get("account", "Unknown")
+        if acc not in accounts:
+            accounts[acc] = {"trades": 0, "winning": 0, "option_pnl": 0.0, "stock_pnl": 0.0}
+        accounts[acc]["stock_pnl"] = accounts[acc].get("stock_pnl", 0.0) + (c.get("stock_pnl") or 0)
+
+    result = []
+    for acc, stats in accounts.items():
+        total = stats["trades"]
+        win_rate = stats["winning"] / total if total > 0 else 0
+        stock_pnl = stats.get("stock_pnl", 0.0)
+        total_pnl = stats["option_pnl"] + stock_pnl
+        result.append({
+            "account": acc,
+            "trades": total,
+            "winning": stats["winning"],
+            "win_rate": win_rate,
+            "option_pnl": stats["option_pnl"],
+            "stock_pnl": stock_pnl,
+            "total_pnl": total_pnl,
+        })
+    return sorted(result, key=lambda x: x["account"])
+
+
 def create_dashboard_tab(service: Any, sid: str, data: dict):
-    """Summary tab matching web UI cards layout."""
+    """Summary tab: KPI cards + Account breakdown + Market info."""
     ov = data.get("overview", {})
     wheel = data.get("wheel_overview", {})
+    trips = data.get("round_trips", [])
+    cycles = data.get("wheel_cycles", [])
 
-    # Build summary table (2 rows: labels, values)
-    labels = ["Total Trades", "Win Rate", "Option P&L", "Stock P&L", "Wheel P&L", "Profit Factor", "Avg ROC"]
-    values = [
+    # --- KPI Row (row 1-2) ---
+    kpi_labels = ["Trades", "Win Rate", "Option P&L", "Stock P&L", "Wheel P&L", "Profit Factor", "Avg ROC"]
+    kpi_values = [
         ov.get("total_trades", 0) or 0,
         ov.get("win_rate", 0) or 0,
         ov.get("total_option_pnl", wheel.get("total_option_pnl", 0)) or 0,
@@ -335,9 +403,32 @@ def create_dashboard_tab(service: Any, sid: str, data: dict):
         ov.get("profit_factor", 0) or 0,
         ov.get("avg_roc", 0) or 0,
     ]
-    formats = [NUMBER, PERCENT, CURRENCY, CURRENCY, CURRENCY, NUMBER, PERCENT]
+    kpi_formats = [NUMBER, PERCENT, CURRENCY, CURRENCY, CURRENCY, NUMBER, PERCENT]
 
-    rows = [labels, [format_val(v, f) for v, f in zip(values, formats)]]
+    # --- Market Info (row 3) ---
+    underlyings = set(t.get("underlying", "") for t in trips)
+    markets = {"US": 0, "JP": 0, "HK": 0, "Other": 0}
+    for u in underlyings:
+        if u.endswith(".T"):
+            markets["JP"] += 1
+        elif u.isdigit() or u.endswith(".HK"):
+            markets["HK"] += 1
+        elif u:
+            markets["US"] += 1
+    market_labels = ["Underlyings", "US Markets", "JP Markets", "HK Markets", "Wheel Cycles", "Completed", "Held"]
+    market_values = [
+        len(underlyings),
+        markets["US"],
+        markets["JP"],
+        markets["HK"],
+        wheel.get("completed_cycles", 0) + wheel.get("stock_held_cycles", 0) + wheel.get("incomplete_cycles", 0),
+        wheel.get("completed_cycles", 0) or 0,
+        (wheel.get("stock_held_cycles", 0) or 0) + (wheel.get("incomplete_cycles", 0) or 0),
+    ]
+    market_formats = [NUMBER, NUMBER, NUMBER, NUMBER, NUMBER, NUMBER, NUMBER]
+
+    # --- Account Breakdown (row 5+) ---
+    account_data = compute_account_breakdown(data)
 
     # Rename first sheet to Dashboard
     meta = service.spreadsheets().get(spreadsheetId=sid).execute()
@@ -347,46 +438,59 @@ def create_dashboard_tab(service: Any, sid: str, data: dict):
         body={"requests": [{"updateSheetProperties": {"properties": {"sheetId": first_id, "title": "Dashboard"}, "fields": "title"}}]},
     ).execute()
 
+    # Write all sections
+    rows = []
+    rows.append(kpi_labels)  # row 1
+    rows.append([format_val(v, f) for v, f in zip(kpi_values, kpi_formats)])  # row 2
+    rows.append(market_labels)  # row 3
+    rows.append([format_val(v, f) for v, f in zip(market_values, market_formats)])  # row 4
+    rows.append([])  # blank row 5
+    rows.append([col[0] for col in ACCOUNT_COLS])  # account header row 6
+    for acc in account_data:
+        rows.append([format_val(acc.get(c[0]), c[1]) for c in ACCOUNT_COLS])  # account data rows 7+
+
     service.spreadsheets().values().update(
         spreadsheetId=sid,
-        range="Dashboard!A1:G2",
+        range=f"Dashboard!A1:G{len(rows)}",
         valueInputOption="USER_ENTERED",
         body={"values": rows},
     ).execute()
 
-    # Dashboard formatting
-    reqs = [
-        # Header row style
-        {
-            "repeatCell": {
-                "range": {"sheetId": first_id, "startRowIndex": 0, "endRowIndex": 1},
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": {"red": 0.15, "green": 0.20, "blue": 0.29},
-                        "textFormat": {"foregroundColor": {"red": 0.97, "green": 0.98, "blue": 0.99}, "bold": True, "fontSize": 11},
-                        "horizontalAlignment": "CENTER",
-                    }
-                },
-                "fields": "userEnteredFormat",
-            }
-        },
-        # Value row style
-        {
-            "repeatCell": {
-                "range": {"sheetId": first_id, "startRowIndex": 1, "endRowIndex": 2},
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": {"red": 0.12, "green": 0.16, "blue": 0.23},
-                        "textFormat": {"foregroundColor": {"red": 1.0, "green": 0.85, "blue": 0.13}, "bold": True, "fontSize": 12},
-                        "horizontalAlignment": "CENTER",
-                    }
-                },
-                "fields": "userEnteredFormat",
-            }
-        },
-    ]
-    # Per-column number format
-    for i, fmt in enumerate(formats):
+    # Formatting requests
+    reqs = []
+
+    # KPI header (row 1)
+    reqs.append({
+        "repeatCell": {
+            "range": {"sheetId": first_id, "startRowIndex": 0, "endRowIndex": 1},
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": {"red": 0.15, "green": 0.20, "blue": 0.29},
+                    "textFormat": {"foregroundColor": {"red": 0.97, "green": 0.98, "blue": 0.99}, "bold": True, "fontSize": 11},
+                    "horizontalAlignment": "CENTER",
+                }
+            },
+            "fields": "userEnteredFormat",
+        }
+    })
+
+    # KPI values (row 2)
+    reqs.append({
+        "repeatCell": {
+            "range": {"sheetId": first_id, "startRowIndex": 1, "endRowIndex": 2},
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": {"red": 0.12, "green": 0.16, "blue": 0.23},
+                    "textFormat": {"foregroundColor": {"red": 1.0, "green": 0.85, "blue": 0.13}, "bold": True, "fontSize": 12},
+                    "horizontalAlignment": "CENTER",
+                }
+            },
+            "fields": "userEnteredFormat",
+        }
+    })
+
+    # Per-column number format for KPI row
+    for i, fmt in enumerate(kpi_formats):
         nf = NUMBER_FORMATS.get(fmt)
         if nf:
             reqs.append({
@@ -396,6 +500,105 @@ def create_dashboard_tab(service: Any, sid: str, data: dict):
                     "fields": "userEnteredFormat.numberFormat",
                 }
             })
+
+    # Market header (row 3) - lighter gray
+    reqs.append({
+        "repeatCell": {
+            "range": {"sheetId": first_id, "startRowIndex": 2, "endRowIndex": 3},
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": {"red": 0.25, "green": 0.30, "blue": 0.38},
+                    "textFormat": {"foregroundColor": {"red": 0.85, "green": 0.88, "blue": 0.92}, "bold": True, "fontSize": 10},
+                    "horizontalAlignment": "CENTER",
+                }
+            },
+            "fields": "userEnteredFormat",
+        }
+    })
+
+    # Market values (row 4)
+    reqs.append({
+        "repeatCell": {
+            "range": {"sheetId": first_id, "startRowIndex": 3, "endRowIndex": 4},
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": {"red": 0.20, "green": 0.25, "blue": 0.32},
+                    "textFormat": {"foregroundColor": {"red": 0.75, "green": 0.80, "blue": 0.85}, "fontSize": 10},
+                    "horizontalAlignment": "CENTER",
+                }
+            },
+            "fields": "userEnteredFormat",
+        }
+    })
+
+    # Account table header (row 6)
+    reqs.append({
+        "repeatCell": {
+            "range": {"sheetId": first_id, "startRowIndex": 5, "endRowIndex": 6},
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": {"red": 0.15, "green": 0.20, "blue": 0.29},
+                    "textFormat": {"foregroundColor": {"red": 0.97, "green": 0.98, "blue": 0.99}, "bold": True},
+                    "horizontalAlignment": "CENTER",
+                }
+            },
+            "fields": "userEnteredFormat",
+        }
+    })
+
+    # Account table columns (format + conditional)
+    account_start = 6
+    account_end = len(rows)
+    for i, col in enumerate(ACCOUNT_COLS):
+        fmt = NUMBER_FORMATS.get(col[1])
+        if fmt:
+            reqs.append({
+                "repeatCell": {
+                    "range": {"sheetId": first_id, "startRowIndex": account_start, "endRowIndex": account_end, "startColumnIndex": i, "endColumnIndex": i + 1},
+                    "cell": {"userEnteredFormat": {"numberFormat": fmt}},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            })
+        if len(col) > 2 and col[2]:
+            rng = {"sheetId": first_id, "startRowIndex": account_start, "endRowIndex": account_end, "startColumnIndex": i, "endColumnIndex": i + 1}
+            reqs.append({
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [rng],
+                        "booleanRule": {
+                            "condition": {"type": "NUMBER_LESS", "values": [{"userEnteredValue": "0"}]},
+                            "format": {
+                                "backgroundColor": {"red": 1.0, "green": 0.92, "blue": 0.92},
+                                "textFormat": {"foregroundColor": {"red": 0.8}},
+                            },
+                        },
+                    },
+                    "index": 0,
+                }
+            })
+            reqs.append({
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [rng],
+                        "booleanRule": {
+                            "condition": {"type": "NUMBER_GREATER_THAN_EQ", "values": [{"userEnteredValue": "0"}]},
+                            "format": {
+                                "backgroundColor": {"red": 0.92, "green": 1.0, "blue": 0.92},
+                                "textFormat": {"foregroundColor": {"green": 0.5}},
+                            },
+                        },
+                    },
+                    "index": 1,
+                }
+            })
+
+    # Freeze top 5 rows (KPI + Market headers)
+    reqs.append({
+        "updateSheetProperties": {
+            "properties": {"sheetId": first_id, "gridProperties": {"frozenRowCount": 5}},
+            "fields": "gridProperties.frozenRowCount",
+        }
+    })
 
     service.spreadsheets().batchUpdate(spreadsheetId=sid, body={"requests": reqs}).execute()
 
