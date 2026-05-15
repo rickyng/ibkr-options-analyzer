@@ -12,8 +12,11 @@ Usage:
 import argparse
 import json
 import sys
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Any
+from datetime import date, datetime
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -26,6 +29,10 @@ from sheets_auth import get_credentials
 CONFIG_DIR = Path.home() / ".ibkr-options-analyzer" / "google"
 SPREADSHEET_ID_FILE = CONFIG_DIR / "spreadsheet_id.txt"
 SPREADSHEET_TITLE = "IBKR Options Analyzer"
+
+# FX rates for currency conversion
+FX_RATES = {"USD": 1.0, "JPY": 0.0067, "HKD": 0.13, "EUR": 1.08, "GBP": 1.25}
+YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 # ── Format Types ────────────────────────────────────────────────
 
@@ -121,6 +128,84 @@ def col_letter(idx: int) -> str:
         result = chr(idx % 26 + ord("A")) + result
         idx = idx // 26 - 1
     return result
+
+
+def fetch_price(symbol: str) -> float | None:
+    """Fetch current price from Yahoo Finance using stdlib."""
+    try:
+        url = YAHOO_URL.format(symbol=symbol) + "?range=1d&interval=1d"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            return data["chart"]["result"][0]["meta"].get("regularMarketPrice")
+    except Exception:
+        pass
+    return None
+
+
+def currency_for_symbol(underlying: str) -> str:
+    if underlying.endswith(".T"):
+        return "JPY"
+    core = underlying.replace(".HK", "").replace(".T", "")
+    if core.isdigit():
+        return "HKD"
+    return "USD"
+
+
+def convert_to_usd(amount: float, currency: str) -> float:
+    return amount * FX_RATES.get(currency, 1.0)
+
+
+def enrich_wheel_cycles(data: dict):
+    """Enrich incomplete/stock_held cycles with unrealized stock P&L (matches web UI)."""
+    cycles = data.get("wheel_cycles", [])
+    if not cycles:
+        return
+
+    open_cycles = [c for c in cycles if c.get("cycle_status") in ("incomplete", "stock_held")]
+    if not open_cycles:
+        return
+
+    # Fetch prices for open underlyings
+    underlyings = {c.get("underlying", "") for c in open_cycles}
+    prices = {}
+    for sym in underlyings:
+        if not sym:
+            continue
+        p = fetch_price(sym)
+        if p is not None:
+            prices[sym] = p
+
+    # Enrich each open cycle
+    for c in open_cycles:
+        ul = c.get("underlying", "")
+        put_strike = c.get("put_strike", 0) or 0
+        qty = c.get("quantity", 1) or 1
+        mult = c.get("multiplier", 100) or 100
+        price = prices.get(ul)
+
+        if price is not None:
+            currency = currency_for_symbol(ul)
+            unrealized = (price - put_strike) * qty * mult
+            c["stock_pnl"] = convert_to_usd(unrealized, currency)
+            c["current_price"] = price
+
+        c["option_pnl"] = (c.get("put_premium") or 0) + (c.get("call_premium") or 0)
+        c["total_pnl"] = (c.get("stock_pnl") or 0) + (c.get("option_pnl") or 0)
+
+    # Recalculate overview
+    completed = [c for c in cycles if c.get("cycle_status") == "completed"]
+    held = [c for c in cycles if c.get("cycle_status") == "stock_held"]
+    incomplete = [c for c in cycles if c.get("cycle_status") == "incomplete"]
+
+    data["wheel_overview"] = {
+        "total_option_pnl": sum(c.get("option_pnl", 0) or 0 for c in cycles),
+        "total_stock_pnl": sum(c.get("stock_pnl", 0) or 0 for c in cycles),
+        "total_wheel_pnl": sum(c.get("total_pnl", 0) or 0 for c in cycles),
+        "completed_cycles": len(completed),
+        "stock_held_cycles": len(held),
+        "incomplete_cycles": len(incomplete),
+    }
 
 
 def format_val(v: Any, fmt: str) -> Any:
@@ -607,6 +692,7 @@ def create_dashboard_tab(service: Any, sid: str, data: dict):
 
 def export_trades(service: Any, sid: str, data: dict):
     """Export trades data matching web UI layout."""
+    enrich_wheel_cycles(data)
     create_dashboard_tab(service, sid, data)
 
     tabs = [
