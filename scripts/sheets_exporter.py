@@ -2,20 +2,16 @@
 """
 Google Sheets exporter for IBKR Options Analyzer.
 
-Reads JSON data from stdin and pushes to a new Google Spreadsheet.
-Creates separate tabs for each data section.
+Reads JSON from stdin and creates a formatted Google Spreadsheet with
+number formatting, conditional highlighting, and frozen headers.
 
 Usage:
-    ibkr-options-analyzer trades --google-sheet | python scripts/sheets_exporter.py trades
-    ibkr-options-analyzer report --google-sheet | python scripts/sheets_exporter.py report
-
-Or with stdin:
-    python scripts/sheets_exporter.py trades < data.json
+    ibkr-options-analyzer trades --google-sheet
+    ibkr-options-analyzer report --google-sheet
 """
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime
 from typing import Any
@@ -23,184 +19,456 @@ from typing import Any
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from sheets_auth import get_credentials, SCOPES
+from sheets_auth import get_credentials
+
+# ── Format Types ────────────────────────────────────────────────
+
+CURRENCY = "currency"
+PERCENT = "percent"
+NUMBER = "number"
+TEXT = "text"
+
+NUMBER_FORMATS = {
+    CURRENCY: {"type": "CURRENCY", "pattern": "$#,##0"},
+    PERCENT: {"type": "PERCENT", "pattern": "0.0%"},
+    NUMBER: {"type": "NUMBER", "pattern": "#,##0.##"},
+    TEXT: None,
+}
+
+# ── Column Schemas ──────────────────────────────────────────────
+# (field_name, format_type[, conditional_highlight])
+
+OVERVIEW_COLS = [
+    ("total_trades", NUMBER),
+    ("winning_trades", NUMBER),
+    ("losing_trades", NUMBER),
+    ("win_rate", PERCENT),
+    ("total_pnl", CURRENCY, True),
+    ("avg_winner", CURRENCY),
+    ("avg_loser", CURRENCY),
+    ("profit_factor", NUMBER),
+    ("expectancy", CURRENCY),
+    ("avg_holding_days", NUMBER),
+    ("avg_roc", PERCENT),
+    ("avg_annualized_return", PERCENT),
+]
+
+ROUND_TRIPS_COLS = [
+    ("underlying", TEXT),
+    ("right", TEXT),
+    ("strike", CURRENCY),
+    ("expiry", TEXT),
+    ("open_date", TEXT),
+    ("close_date", TEXT),
+    ("close_reason", TEXT),
+    ("quantity", NUMBER),
+    ("net_premium", CURRENCY, True),
+    ("realized_pnl", CURRENCY, True),
+    ("roc", PERCENT),
+    ("annualized_return", PERCENT),
+    ("holding_days", NUMBER),
+    ("commission", CURRENCY),
+    ("open_price", CURRENCY),
+    ("strategy_type", TEXT),
+]
+
+STRATEGY_COLS = [
+    ("strategy_type", TEXT),
+    ("trade_count", NUMBER),
+    ("winning_trades", NUMBER),
+    ("win_rate", PERCENT),
+    ("total_pnl", CURRENCY, True),
+    ("avg_pnl", CURRENCY),
+    ("profit_factor", NUMBER),
+    ("avg_holding_days", NUMBER),
+]
+
+DTE_COLS = [
+    ("dte_bucket", TEXT),
+    ("trade_count", NUMBER),
+    ("winning_trades", NUMBER),
+    ("win_rate", PERCENT),
+    ("total_pnl", CURRENCY, True),
+]
+
+UNDERLYING_COLS = [
+    ("underlying", TEXT),
+    ("trade_count", NUMBER),
+    ("winning_trades", NUMBER),
+    ("win_rate", PERCENT),
+    ("total_pnl", CURRENCY, True),
+    ("avg_pnl", CURRENCY),
+]
+
+WHEEL_OVERVIEW_COLS = [
+    ("total_option_pnl", CURRENCY, True),
+    ("total_stock_pnl", CURRENCY, True),
+    ("total_wheel_pnl", CURRENCY, True),
+    ("completed_cycles", NUMBER),
+    ("stock_held_cycles", NUMBER),
+    ("incomplete_cycles", NUMBER),
+]
+
+WHEEL_CYCLES_COLS = [
+    ("underlying", TEXT),
+    ("account", TEXT),
+    ("cycle_status", TEXT),
+    ("total_pnl", CURRENCY, True),
+    ("option_pnl", CURRENCY, True),
+    ("stock_pnl", CURRENCY, True),
+    ("put_strike", CURRENCY),
+    ("call_strike", CURRENCY),
+    ("put_premium", CURRENCY),
+    ("call_premium", CURRENCY),
+    ("quantity", NUMBER),
+    ("multiplier", NUMBER),
+    ("put_assigned_date", TEXT),
+    ("call_close_date", TEXT),
+    ("call_close_reason", TEXT),
+]
+
+
+# ── Helpers ─────────────────────────────────────────────────────
+
+def col_letter(idx: int) -> str:
+    """Convert zero-based column index to A1 letter."""
+    result = ""
+    while idx >= 0:
+        result = chr(idx % 26 + ord("A")) + result
+        idx = idx // 26 - 1
+    return result
+
+
+def format_cell(val: Any, fmt: str) -> Any:
+    """Convert a JSON value to the right Python type for Sheets."""
+    if val is None:
+        return ""
+    if fmt in (CURRENCY, NUMBER, PERCENT):
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return val
+    return str(val)
+
+
+def data_to_rows(data: Any, columns: list) -> list[list]:
+    """Convert JSON data to rows using column schema for ordering."""
+    headers = [col[0] for col in columns]
+
+    if isinstance(data, dict):
+        return [headers, [format_cell(data.get(c[0]), c[1]) for c in columns]]
+
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        rows = [headers]
+        for item in data:
+            rows.append([format_cell(item.get(c[0]), c[1]) for c in columns])
+        return rows
+
+    return [headers]
+
+
+def add_totals_row(rows: list[list], columns: list) -> list[list]:
+    """Append a totals row with SUM formulas for numeric columns."""
+    if len(rows) < 3:  # header + at least 2 data rows
+        return rows
+
+    last_data = len(rows)
+    totals = []
+    labelled = False
+
+    for i, col in enumerate(columns):
+        if col[1] in (CURRENCY, NUMBER, PERCENT):
+            letter = col_letter(i)
+            totals.append(f"=SUM({letter}2:{letter}{last_data})")
+        elif not labelled:
+            totals.append(f"TOTAL ({last_data - 1} rows)")
+            labelled = True
+        else:
+            totals.append("")
+
+    rows.append(totals)
+    return rows
+
+
+# ── Sheets API ──────────────────────────────────────────────────
 
 def create_spreadsheet(service: Any, title: str) -> str:
-    """Create a new spreadsheet and return its ID."""
-    spreadsheet = {
-        'properties': {'title': title}
-    }
-    result = service.spreadsheets().create(body=spreadsheet).execute()
-    return result['spreadsheetId']
+    result = service.spreadsheets().create(
+        body={"properties": {"title": title}}
+    ).execute()
+    return result["spreadsheetId"]
 
-def get_spreadsheet_url(spreadsheet_id: str) -> str:
-    """Return the URL for a spreadsheet."""
-    return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
 
-def json_to_rows(data: dict | list) -> list[list]:
-    """
-    Convert JSON object or array to rows for Google Sheets.
+def get_sheet_id(service: Any, sid: str, tab_name: str) -> int | None:
+    meta = service.spreadsheets().get(spreadsheetId=sid).execute()
+    for sheet in meta["sheets"]:
+        if sheet["properties"]["title"] == tab_name:
+            return sheet["properties"]["sheetId"]
+    return None
 
-    For dict: creates header row from keys, then data row from values
-    For list of dicts: creates header row, then rows for each item
-    For list of primitives: creates single column rows
-    """
-    if isinstance(data, dict):
-        # Single row: header + values
-        headers = list(data.keys())
-        values = [format_value(v) for v in data.values()]
-        return [headers, values]
 
-    elif isinstance(data, list):
-        if not data:
-            return []
-
-        if isinstance(data[0], dict):
-            # Array of objects: header from first item keys, rows for each
-            headers = list(data[0].keys())
-            rows = [headers]
-            for item in data:
-                row = [format_value(item.get(k, '')) for k in headers]
-                rows.append(row)
-            return rows
-
-        else:
-            # Array of primitives: single column
-            return [[format_value(v)] for v in data]
-
-    else:
-        # Single value
-        return [[format_value(data)]]
-
-def format_value(val: Any) -> str:
-    """Format a value for Google Sheets cell."""
-    if val is None:
-        return ''
-    elif isinstance(val, float):
-        if val == float('inf') or val == float('-inf'):
-            return 'UNLIMITED'
-        return str(val)
-    elif isinstance(val, bool):
-        return str(val)
-    else:
-        return str(val)
-
-def create_tab(service: Any, spreadsheet_id: str, tab_name: str, rows: list[list]):
-    """
-    Create a new tab and populate with data.
-
-    Uses batchUpdate to add sheet, then update to add values.
-    """
+def create_tab(
+    service: Any, sid: str, tab_name: str,
+    data: Any, columns: list, totals: bool = False,
+):
+    """Create a tab, write data, and apply formatting."""
+    rows = data_to_rows(data, columns)
     if not rows:
         return
 
-    # Find existing sheet IDs to avoid collision
-    metadata = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-    existing_names = {s['properties']['title'] for s in metadata['sheets']}
+    if totals:
+        rows = add_totals_row(rows, columns)
 
-    # Create sheet if it doesn't exist
-    if tab_name in existing_names:
-        # Find the sheet ID
-        sheet_id = None
-        for s in metadata['sheets']:
-            if s['properties']['title'] == tab_name:
-                sheet_id = s['properties']['sheetId']
-                break
-    else:
-        # Create new sheet
-        request = {
-            'addSheet': {
-                'properties': {'title': tab_name}
-            }
-        }
-        response = service.spreadsheets().batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body={'requests': [request]}
-        ).execute()
-        sheet_id = response['replies'][0]['addSheet']['properties']['sheetId']
-
-    # Calculate range based on data size
     num_rows = len(rows)
-    num_cols = max(len(row) for row in rows) if rows else 0
+    num_cols = len(columns)
 
-    # Build range A1 notation (e.g., "Overview!A1:J2")
-    end_col = chr(ord('A') + num_cols - 1) if num_cols > 0 else 'A'
-    range_notation = f"{tab_name}!A1:{end_col}{num_rows}"
+    # Ensure sheet exists
+    meta = service.spreadsheets().get(spreadsheetId=sid).execute()
+    existing = {s["properties"]["title"] for s in meta["sheets"]}
+    if tab_name not in existing:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=sid,
+            body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]},
+        ).execute()
 
-    # Update values
-    body = {
-        'values': rows,
-        'majorDimension': 'ROWS'
-    }
-
+    # Write values
+    end_col = col_letter(num_cols - 1)
     service.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id,
-        range=range_notation,
-        valueInputOption='USER_ENTERED',
-        body=body
+        spreadsheetId=sid,
+        range=f"{tab_name}!A1:{end_col}{num_rows}",
+        valueInputOption="USER_ENTERED",
+        body={"values": rows, "majorDimension": "ROWS"},
     ).execute()
 
-def export_trades(service: Any, spreadsheet_id: str, data: dict):
-    """
-    Export trades command data to spreadsheet.
+    # Apply formatting
+    sheet_id = get_sheet_id(service, sid, tab_name)
+    if sheet_id is not None:
+        apply_formatting(service, sid, sheet_id, columns, num_rows, totals)
 
-    Creates tabs: Overview, Round_Trips, Strategy_Performance, DTE_Breakdown,
-                  Underlying_Breakdown, Loss_Clusters, Streak_Info,
-                  Wheel_Overview, Wheel_Cycles
-    """
+
+def apply_formatting(
+    service: Any, sid: str, sheet_id: int,
+    columns: list, num_rows: int, has_totals: bool,
+):
+    """Apply frozen header, header style, number formats, conditional highlighting."""
+    reqs = []
+
+    # Frozen header row
+    reqs.append({
+        "updateSheetProperties": {
+            "properties": {
+                "sheetId": sheet_id,
+                "gridProperties": {"frozenRowCount": 1},
+            },
+            "fields": "gridProperties.frozenRowCount",
+        }
+    })
+
+    # Header styling (dark background, white bold text)
+    reqs.append({
+        "repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": {"red": 0.15, "green": 0.20, "blue": 0.29},
+                    "textFormat": {
+                        "foregroundColor": {"red": 0.97, "green": 0.98, "blue": 0.99},
+                        "bold": True,
+                        "fontSize": 10,
+                    },
+                    "horizontalAlignment": "CENTER",
+                }
+            },
+            "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
+        }
+    })
+
+    # Per-column number format + conditional highlighting
+    data_end = num_rows - (1 if has_totals else 0)
+    for col_idx, col_def in enumerate(columns):
+        fmt_type = col_def[1]
+        nf = NUMBER_FORMATS.get(fmt_type)
+        if nf is None:
+            continue
+
+        # Number format
+        reqs.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": data_end,
+                    "startColumnIndex": col_idx,
+                    "endColumnIndex": col_idx + 1,
+                },
+                "cell": {"userEnteredFormat": {"numberFormat": nf}},
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        })
+
+        # Conditional highlighting for P&L columns
+        if len(col_def) > 2 and col_def[2]:
+            rng = {
+                "sheetId": sheet_id,
+                "startRowIndex": 1,
+                "startColumnIndex": col_idx,
+                "endColumnIndex": col_idx + 1,
+            }
+            # Red for negative
+            reqs.append({
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [rng],
+                        "booleanRule": {
+                            "condition": {
+                                "type": "NUMBER_LESS_THAN",
+                                "values": [{"userEnteredValue": "0"}],
+                            },
+                            "format": {
+                                "backgroundColor": {"red": 1.0, "green": 0.92, "blue": 0.92},
+                                "textFormat": {"foregroundColor": {"red": 0.8, "green": 0.0, "blue": 0.0}},
+                            },
+                        },
+                    },
+                    "index": 0,
+                }
+            })
+            # Green for positive/zero
+            reqs.append({
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [rng],
+                        "booleanRule": {
+                            "condition": {
+                                "type": "NUMBER_GREATER_THAN_OR_EQUAL",
+                                "values": [{"userEnteredValue": "0"}],
+                            },
+                            "format": {
+                                "backgroundColor": {"red": 0.92, "green": 1.0, "blue": 0.92},
+                                "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.5, "blue": 0.0}},
+                            },
+                        },
+                    },
+                    "index": 1,
+                }
+            })
+
+    # Totals row styling
+    if has_totals and num_rows > 1:
+        reqs.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": num_rows - 1,
+                    "endRowIndex": num_rows,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {"red": 0.94, "green": 0.94, "blue": 0.94},
+                        "textFormat": {"bold": True},
+                        "borders": {
+                            "top": {"style": "SOLID", "width": 2},
+                        },
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat,borders.top)",
+            }
+        })
+
+    if reqs:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=sid, body={"requests": reqs}
+        ).execute()
+
+
+# ── Export Commands ─────────────────────────────────────────────
+
+def export_trades(service: Any, sid: str, data: dict):
+    """Export trades command data with formatted tabs."""
     tabs = [
-        ('Overview', data.get('overview')),
-        ('Round_Trips', data.get('round_trips')),
-        ('Strategy_Performance', data.get('strategy_performance')),
-        ('DTE_Breakdown', data.get('dte_breakdown')),
-        ('Underlying_Breakdown', data.get('underlying_breakdown')),
-        ('Loss_Clusters', data.get('loss_clusters')),
-        ('Streak_Info', data.get('streak_info')),
-        ('Wheel_Overview', data.get('wheel_overview')),
-        ('Wheel_Cycles', data.get('wheel_cycles')),
+        ("Overview", data.get("overview"), OVERVIEW_COLS, False),
+        ("Round_Trips", data.get("round_trips"), ROUND_TRIPS_COLS, True),
+        ("Strategy", data.get("strategy_performance"), STRATEGY_COLS, True),
+        ("DTE_Breakdown", data.get("dte_breakdown"), DTE_COLS, True),
+        ("Underlying", data.get("underlying_breakdown"), UNDERLYING_COLS, True),
+        ("Wheel_Overview", data.get("wheel_overview"), WHEEL_OVERVIEW_COLS, False),
+        ("Wheel_Cycles", data.get("wheel_cycles"), WHEEL_CYCLES_COLS, True),
     ]
 
-    for tab_name, tab_data in tabs:
+    # Optional tabs that may not exist
+    for key in ("loss_clusters", "streak_info"):
+        if data.get(key):
+            tabs.append((key.replace("_", " ").title(), data[key], None, False))
+
+    for tab_name, tab_data, columns, totals in tabs:
+        if tab_data is None:
+            continue
+        if columns:
+            create_tab(service, sid, tab_name, tab_data, columns, totals)
+        else:
+            # Fallback: raw json_to_rows without formatting
+            _create_raw_tab(service, sid, tab_name, tab_data)
+
+
+def export_report(service: Any, sid: str, data: dict):
+    """Export report command data."""
+    positions = data.get("positions", data.get("data", {}).get("positions"))
+    risk = data.get("risk_summaries", data.get("data", {}).get("risk_summaries"))
+    exposures = data.get(
+        "underlying_exposures",
+        data.get("data", {}).get("underlying_exposures", data.get("exposures")),
+    )
+
+    for tab_name, tab_data in [
+        ("Positions", positions),
+        ("Risk_Summaries", risk),
+        ("Underlying_Exposure", exposures),
+    ]:
         if tab_data is not None:
-            rows = json_to_rows(tab_data)
-            if rows:
-                create_tab(service, spreadsheet_id, tab_name, rows)
+            _create_raw_tab(service, sid, tab_name, tab_data)
 
-def export_report(service: Any, spreadsheet_id: str, data: dict):
-    """
-    Export report command data to spreadsheet.
 
-    Creates tabs: Positions, Risk_Summaries, Underlying_Exposure
-    """
-    # The JSON output from report command is wrapped in a 'data' field
-    # or returned directly from JsonOutput::report()
+def _create_raw_tab(service: Any, sid: str, tab_name: str, data: Any):
+    """Create a tab with basic formatting (no column schema)."""
+    if isinstance(data, dict):
+        headers = list(data.keys())
+        rows = [headers, [str(v) for v in data.values()]]
+    elif isinstance(data, list) and data and isinstance(data[0], dict):
+        headers = list(data[0].keys())
+        rows = [headers] + [[str(item.get(k, "")) for k in headers] for item in data]
+    else:
+        return
 
-    # Check structure - may be direct or nested
-    positions = data.get('positions', data.get('data', {}).get('positions'))
-    risk_summaries = data.get('risk_summaries', data.get('data', {}).get('risk_summaries'))
-    exposures = data.get('underlying_exposures', data.get('data', {}).get('underlying_exposures', data.get('exposures')))
+    if not rows:
+        return
 
-    tabs = [
-        ('Positions', positions),
-        ('Risk_Summaries', risk_summaries),
-        ('Underlying_Exposure', exposures),
-    ]
+    # Ensure sheet exists
+    meta = service.spreadsheets().get(spreadsheetId=sid).execute()
+    existing = {s["properties"]["title"] for s in meta["sheets"]}
+    if tab_name not in existing:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=sid,
+            body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]},
+        ).execute()
 
-    for tab_name, tab_data in tabs:
-        if tab_data is not None:
-            rows = json_to_rows(tab_data)
-            if rows:
-                create_tab(service, spreadsheet_id, tab_name, rows)
+    num_cols = max(len(r) for r in rows)
+    end_col = col_letter(num_cols - 1)
+    service.spreadsheets().values().update(
+        spreadsheetId=sid,
+        range=f"{tab_name}!A1:{end_col}{len(rows)}",
+        valueInputOption="USER_ENTERED",
+        body={"values": rows, "majorDimension": "ROWS"},
+    ).execute()
+
+
+# ── Main ────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Export IBKR analysis to Google Sheets")
-    parser.add_argument('command', choices=['trades', 'report'],
-                        help='Command type (trades or report)')
-    parser.add_argument('--stdin', action='store_true', default=True,
-                        help='Read JSON from stdin (default)')
-    parser.add_argument('--title', type=str, default=None,
-                        help='Custom spreadsheet title')
-
+    parser.add_argument(
+        "command", choices=["trades", "report"], help="Data type to export"
+    )
+    parser.add_argument("--title", type=str, default=None, help="Custom spreadsheet title")
     args = parser.parse_args()
 
     # Read JSON from stdin
@@ -214,42 +482,40 @@ def main():
         print(f"Error: Invalid JSON input: {e}", file=sys.stderr)
         return 1
 
-    # Get credentials
+    # Authenticate
     creds = get_credentials()
     if not creds:
         print("Error: Authentication failed", file=sys.stderr)
         print("Run: python scripts/sheets_auth.py login", file=sys.stderr)
         return 1
 
-    # Build service
-    service = build('sheets', 'v4', credentials=creds)
+    service = build("sheets", "v4", credentials=creds)
 
-    # Create spreadsheet with timestamped title
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-    default_title = f"IBKR {args.command.capitalize()} Report {timestamp}"
-    title = args.title or default_title
+    # Create spreadsheet
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    title = args.title or f"IBKR {args.command.capitalize()} {timestamp}"
 
     try:
-        spreadsheet_id = create_spreadsheet(service, title)
+        sid = create_spreadsheet(service, title)
     except Exception as e:
         print(f"Error: Failed to create spreadsheet: {e}", file=sys.stderr)
         return 1
 
-    # Export data based on command type
+    # Export
     try:
-        if args.command == 'trades':
-            export_trades(service, spreadsheet_id, data)
-        elif args.command == 'report':
-            export_report(service, spreadsheet_id, data)
+        if args.command == "trades":
+            export_trades(service, sid, data)
+        elif args.command == "report":
+            export_report(service, sid, data)
     except Exception as e:
         print(f"Error: Failed to export data: {e}", file=sys.stderr)
         return 1
 
     # Print URL for C++ to display
-    url = get_spreadsheet_url(spreadsheet_id)
+    url = f"https://docs.google.com/spreadsheets/d/{sid}/edit"
     print(url)
-
     return 0
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     sys.exit(main())
