@@ -144,6 +144,18 @@ def _positions_tab() -> dbc.Tab:
                 className="mb-4",
             ),
 
+            # Expiry Calendar: strikes by underlying and DTE bucket
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H5("Expiry Calendar", className="mb-3", style={"color": "#f8fafc"}),
+                        html.Div(id="expiry-calendar-table"),
+                    ]
+                ),
+                style={"backgroundColor": BG_CARD, "border": "none"},
+                className="mb-4",
+            ),
+
             # Position table
             dbc.Card(
                 dbc.CardBody(
@@ -439,7 +451,7 @@ def _trade_review_tab() -> dbc.Tab:
                     dbc.Col(_summary_card("Win Rate", "tr-card-win-rate"), width=2),
                     dbc.Col(_summary_card("Option P&L", "tr-card-option-pnl"), width=2),
                     dbc.Col(_summary_card("Stock P&L", "tr-card-stock-pnl"), width=2),
-                    dbc.Col(_summary_card("Total P&L", "tr-card-pnl"), width=2),
+                    dbc.Col(_summary_card("Wheel P&L", "tr-card-pnl"), width=2),
                     dbc.Col(_summary_card("Profit Factor", "tr-card-profit-factor"), width=1),
                     dbc.Col(_summary_card("Avg ROC", "tr-card-avg-roc"), width=1),
                 ],
@@ -532,7 +544,7 @@ def _trade_review_tab() -> dbc.Tab:
                         page_size=25,
                         css=[{"selector": ".dash-spreadsheet", "rule": "font-family: monospace"}],
                     ),
-                    html.H6("Assigned Stock Positions", className="mt-4 mb-2", style={"color": "#f8fafc"}),
+                    html.H6("Wheel Cycles", className="mt-4 mb-2", style={"color": "#f8fafc"}),
                     html.Div(id="tr-stock-table"),
                 ],
             ),

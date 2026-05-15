@@ -544,6 +544,16 @@ def register_callbacks(app: Dash) -> None:
                 "total_pnl": sum(_rt_pnl(t) for t in _mt),
             })
 
+        # Get wheel cycle P&L for Stock P&L card
+        wheel_overview = data.get("wheel_overview", {})
+        if wheel_overview:
+            total_stock_pnl = wheel_overview.get("total_stock_pnl", 0)
+            total_option_pnl = wheel_overview.get("total_option_pnl", 0)
+        else:
+            total_stock_pnl = sum(rt.get("assigned_stock_pnl", 0) for rt in round_trips)
+            total_option_pnl = sum(rt.get("realized_pnl", 0) for rt in round_trips)
+        total_wheel_pnl = total_option_pnl + total_stock_pnl
+
         return {
             **data,
             "round_trips": round_trips,
@@ -553,8 +563,9 @@ def register_callbacks(app: Dash) -> None:
                 "winning_trades": len(winners),
                 "losing_trades": len(losers),
                 "win_rate": win_rate,
-                "total_option_pnl": sum(rt.get("realized_pnl", 0) for rt in round_trips),
-                "total_stock_pnl": sum(rt.get("assigned_stock_pnl", 0) for rt in round_trips),
+                "total_option_pnl": total_option_pnl,
+                "total_stock_pnl": total_stock_pnl,
+                "total_wheel_pnl": total_wheel_pnl,
                 "total_pnl": total_pnl,
                 "avg_winner": avg_winner,
                 "avg_loser": avg_loser,
@@ -683,6 +694,109 @@ def register_callbacks(app: Dash) -> None:
             },
         )
         return fig
+
+    @app.callback(
+        Output("expiry-calendar-table", "children"),
+        Input("filtered-positions-data", "data"),
+    )
+    def update_expiry_calendar_table(positions):
+        """Render expiry calendar: strikes grouped by underlying across DTE buckets."""
+        if not positions:
+            return html.P("No positions", className="text-muted")
+
+        today = date.today()
+        bucket_labels = ["<7d", "7-14d", "14-21d", "21-28d", "28d+"]
+        bucket_ranges = [(0, 7), (7, 14), (14, 21), (21, 28), (28, 9999)]
+        bucket_colors = {
+            "<7d": RISK_COLORS["CRITICAL"],
+            "7-14d": RISK_COLORS["HIGH"],
+            "14-21d": RISK_COLORS["EXPIRING"],
+            "21-28d": RISK_COLORS["MODERATE"],
+            "28d+": RISK_COLORS["SAFE"],
+        }
+
+        def get_bucket(dte: int) -> str:
+            for label, (lo, hi) in zip(bucket_labels, bucket_ranges):
+                if lo <= dte < hi:
+                    return label
+            return bucket_labels[-1]
+
+        # Group: underlying → bucket → list of strikes with info
+        ul_map: dict[str, dict[str, list]] = {}
+        for pos in positions:
+            ul = pos.get("underlying", "")
+            expiry_str = pos.get("expiry", "")
+            expiry_date = _parse_expiry(expiry_str)
+            if not expiry_date:
+                continue
+            dte = (expiry_date - today).days
+            bucket = get_bucket(dte)
+            ul_map.setdefault(ul, {b: [] for b in bucket_labels})
+            strike = pos.get("strike", 0)
+            right = pos.get("right", "P")
+            qty = abs(pos.get("quantity", 0) or 0)
+            risk = pos.get("risk_category", "SAFE")
+            ul_map[ul][bucket].append({
+                "strike": strike,
+                "right": right,
+                "qty": qty,
+                "risk": risk,
+                "expiry": expiry_str,
+            })
+
+        if not ul_map:
+            return html.P("No positions", className="text-muted")
+
+        # Build table
+        header_cells = [html.Th("Underlying", style={"textAlign": "left", "backgroundColor": "#253449", "color": "#f8fafc", "minWidth": "80px"})]
+        for bl in bucket_labels:
+            header_cells.append(html.Th(bl, style={"backgroundColor": "#253449", "color": bucket_colors[bl], "textAlign": "center", "minWidth": "100px"}))
+        header = html.Thead(html.Tr(header_cells))
+
+        rows = []
+        for i, (ul, buckets) in enumerate(sorted(ul_map.items())):
+            bg = BG_CARD if i % 2 == 0 else "#253449"
+            cells = [html.Td(ul, style={"textAlign": "left", "backgroundColor": bg, "color": "#f8fafc", "fontWeight": "bold"})]
+
+            for bl in bucket_labels:
+                strikes = buckets[bl]
+                if not strikes:
+                    cells.append(html.Td("—", style={"backgroundColor": bg, "color": TEXT_MUTED, "textAlign": "center"}))
+                else:
+                    # Build strike badges
+                    badges = []
+                    for s in sorted(strikes, key=lambda x: x["strike"]):
+                        right = s["right"]
+                        qty = s["qty"]
+                        strike_val = s["strike"]
+                        risk = s["risk"]
+                        color = RISK_COLORS.get(risk, TEXT_MUTED)
+                        label = f"{strike_val:,.0f}{right}"
+                        if qty > 1:
+                            label += f"×{int(qty)}"
+                        badges.append(html.Span(
+                            label,
+                            style={
+                                "backgroundColor": f"{color}22",
+                                "color": color,
+                                "padding": "1px 5px",
+                                "borderRadius": "3px",
+                                "fontSize": "0.78rem",
+                                "margin": "1px",
+                                "display": "inline-block",
+                                "border": f"1px solid {color}44",
+                            },
+                        ))
+                    cells.append(html.Td(badges, style={"backgroundColor": bg, "textAlign": "center"}))
+
+            rows.append(html.Tr(cells))
+
+        return dbc.Table(
+            [header, html.Tbody(rows)],
+            bordered=True,
+            className="mb-0",
+            style={"fontSize": "0.85rem"},
+        )
 
     # Callback: Update exposure table
     @app.callback(
@@ -1505,6 +1619,73 @@ def register_callbacks(app: Dash) -> None:
                 if collateral > 0:
                     rt["roc"] = (rt["net_pnl"] / collateral) * 100
 
+        # Enrich wheel_cycles with unrealized stock P&L for incomplete/stock_held
+        wheel_cycles = data.get("wheel_cycles", [])
+        if wheel_cycles:
+            # Collect underlyings that need prices
+            wc_underlyings = set()
+            for wc in wheel_cycles:
+                if wc.get("cycle_status") in ("incomplete", "stock_held"):
+                    wc_underlyings.add(wc.get("underlying", ""))
+
+            if wc_underlyings:
+                # Reuse prices dict from assigned trades, or fetch fresh
+                wc_prices = {}
+                if assigned:
+                    wc_prices = {k: v for k, v in prices.items() if k in wc_underlyings}
+
+                # Fetch missing prices
+                missing_wc = [s for s in wc_underlyings if s not in wc_prices]
+                if missing_wc:
+                    ph = ",".join("?" for _ in missing_wc)
+                    wc_price_rows = query(
+                        f"SELECT symbol, price FROM cached_prices WHERE symbol IN ({ph})",
+                        tuple(missing_wc),
+                    )
+                    for r in wc_price_rows:
+                        wc_prices[r["symbol"]] = r["price"]
+
+                still_missing = [s for s in missing_wc if s not in wc_prices]
+                for symbol in still_missing:
+                    price = _fetch_price_yahoo(symbol)
+                    if price is not None:
+                        wc_prices[symbol] = price
+
+                # Update incomplete/stock_held cycles with unrealized stock P&L
+                for wc in wheel_cycles:
+                    if wc.get("cycle_status") in ("incomplete", "stock_held"):
+                        underlying = wc.get("underlying", "")
+                        put_strike = wc.get("put_strike", 0)
+                        qty = wc.get("quantity", 1)
+                        mult = wc.get("multiplier", 100)
+                        current_price = wc_prices.get(underlying)
+
+                        if current_price is not None:
+                            currency = _derive_currency_from_symbol(underlying)
+                            unrealized = (current_price - put_strike) * qty * mult
+                            wc["stock_pnl"] = _convert_to_usd(unrealized, currency)
+                            wc["current_price"] = current_price
+                        else:
+                            wc["current_price"] = None
+
+                        # Recalculate totals
+                        wc["option_pnl"] = wc.get("put_premium", 0) + wc.get("call_premium", 0)
+                        wc["total_pnl"] = wc.get("stock_pnl", 0) + wc.get("option_pnl", 0)
+
+            # Always recalculate wheel_overview from enriched cycles
+            completed_cycles = [wc for wc in wheel_cycles if wc.get("cycle_status") == "completed"]
+            stock_held_cycles = [wc for wc in wheel_cycles if wc.get("cycle_status") == "stock_held"]
+            incomplete_cycles = [wc for wc in wheel_cycles if wc.get("cycle_status") == "incomplete"]
+
+            data["wheel_overview"] = {
+                "total_option_pnl": sum(wc.get("option_pnl", 0) for wc in wheel_cycles),
+                "total_stock_pnl": sum(wc.get("stock_pnl", 0) for wc in wheel_cycles),
+                "total_wheel_pnl": sum(wc.get("total_pnl", 0) for wc in wheel_cycles),
+                "completed_cycles": len(completed_cycles),
+                "stock_held_cycles": len(stock_held_cycles),
+                "incomplete_cycles": len(incomplete_cycles),
+            }
+
         # Convert remaining P&L values to USD
         for rt in trips:
             if rt.get("close_reason") != "assigned":
@@ -1794,7 +1975,7 @@ def register_callbacks(app: Dash) -> None:
         win_rate = ov.get("win_rate", 0) or 0
         option_pnl = ov.get("total_option_pnl", 0) or 0
         stock_pnl = ov.get("total_stock_pnl", 0) or 0
-        total_pnl = ov.get("total_pnl", 0) or 0
+        wheel_pnl = ov.get("total_wheel_pnl", 0) or 0
         pf = ov.get("profit_factor") or 0
         avg_roc = ov.get("avg_roc", 0) or 0
 
@@ -1803,7 +1984,7 @@ def register_callbacks(app: Dash) -> None:
             f"{win_rate:.1%}" if total else "—",
             f"${option_pnl:,.0f}" if total else "—",
             f"${stock_pnl:,.0f}" if total else "—",
-            f"${total_pnl:,.0f}" if total else "—",
+            f"${wheel_pnl:,.0f}" if total else "—",
             f"{pf:.2f}" if total else "—",
             f"{avg_roc:.1%}" if total else "—",
         )
@@ -1920,75 +2101,96 @@ def register_callbacks(app: Dash) -> None:
         Input("tr-filtered-data", "data"),
     )
     def render_stock_table(data):
-        """Render assigned stock positions grouped by underlying with expandable details."""
+        """Render wheel cycle positions grouped by underlying."""
         if not data:
             return html.P("No assigned positions", className="text-muted")
 
-        trips = data.get("round_trips", [])
-        assigned = [rt for rt in trips if rt.get("close_reason") == "assigned"]
-        if not assigned:
+        wheel_cycles = data.get("wheel_cycles", [])
+        if not wheel_cycles:
             return html.P("No assigned positions", className="text-muted")
 
         # Group by underlying
-        from collections import defaultdict
         grouped = defaultdict(list)
-        for rt in assigned:
-            grouped[rt.get("underlying", "Unknown")].append(rt)
+        for wc in wheel_cycles:
+            grouped[wc.get("underlying", "Unknown")].append(wc)
 
         # Build accordion items
         items = []
         for underlying in sorted(grouped.keys()):
-            positions = grouped[underlying]
+            cycles = grouped[underlying]
 
             # Calculate totals for the group
-            total_shares = sum(p.get("assigned_shares", 0) for p in positions)
-            total_stock_pnl = sum(p.get("assigned_stock_pnl", 0) for p in positions)
-            total_option_pnl = sum(p.get("realized_pnl", 0) for p in positions)
-            total_net_pnl = sum(p.get("net_pnl", 0) for p in positions)
+            total_stock_pnl = sum(c.get("stock_pnl", 0) for c in cycles)
+            total_option_pnl = sum(c.get("option_pnl", 0) for c in cycles)
+            total_pnl = sum(c.get("total_pnl", 0) for c in cycles)
+            completed = sum(1 for c in cycles if c.get("cycle_status") == "completed")
+            held = sum(1 for c in cycles if c.get("cycle_status") in ("stock_held", "incomplete"))
 
-            # Header row for the group
-            pnl_color = RISK_COLORS["SAFE"] if total_net_pnl >= 0 else RISK_COLORS["CRITICAL"]
+            status_parts = []
+            if completed:
+                status_parts.append(f"{completed} called away")
+            if held:
+                status_parts.append(f"{held} held")
+            status_str = ", ".join(status_parts) if status_parts else "unknown"
+
+            pnl_color = RISK_COLORS["SAFE"] if total_pnl >= 0 else RISK_COLORS["CRITICAL"]
             header = html.Div([
                 html.Span(underlying, style={"fontWeight": "bold", "fontSize": "1rem"}),
-                html.Span(f" ({len(positions)} positions)", className="text-muted", style={"marginLeft": "8px"}),
-                html.Span(f"Shares: {total_shares:,}", style={"marginLeft": "20px", "fontSize": "0.9rem"}),
-                html.Span(f"Net P&L: ", style={"marginLeft": "20px", "fontSize": "0.9rem"}),
-                html.Span(f"${total_net_pnl:,.0f}", style={"color": pnl_color, "fontSize": "0.9rem", "fontWeight": "bold"}),
+                html.Span(f" ({len(cycles)} cycles)", className="text-muted", style={"marginLeft": "8px"}),
+                html.Span(status_str, style={"marginLeft": "20px", "fontSize": "0.85rem", "color": TEXT_MUTED}),
+                html.Span(" | Opt: ", style={"marginLeft": "20px", "fontSize": "0.9rem"}),
+                html.Span(f"${total_option_pnl:,.0f}", style={"color": RISK_COLORS["SAFE"], "fontSize": "0.9rem"}),
+                html.Span(" + Stock: ", style={"fontSize": "0.9rem"}),
+                html.Span(f"${total_stock_pnl:,.0f}", style={"color": RISK_COLORS["SAFE"] if total_stock_pnl >= 0 else RISK_COLORS["CRITICAL"], "fontSize": "0.9rem"}),
+                html.Span(" = ", style={"fontSize": "0.9rem"}),
+                html.Span(f"${total_pnl:,.0f}", style={"color": pnl_color, "fontSize": "0.9rem", "fontWeight": "bold"}),
             ], style={"display": "flex", "alignItems": "center"})
 
             # Detail table rows
             detail_rows = []
-            for i, p in enumerate(positions):
+            for i, c in enumerate(cycles):
                 bg = BG_CARD if i % 2 == 0 else "#253449"
-                row_pnl = p.get("net_pnl", 0)
-                row_pnl_color = RISK_COLORS["SAFE"] if row_pnl >= 0 else RISK_COLORS["CRITICAL"]
-                stock_pnl = p.get("assigned_stock_pnl", 0)
-                stock_pnl_color = RISK_COLORS["SAFE"] if stock_pnl >= 0 else RISK_COLORS["CRITICAL"]
+                spnl = c.get("stock_pnl", 0)
+                opnl = c.get("option_pnl", 0)
+                tpnl = c.get("total_pnl", 0)
+                put_strike = c.get("put_strike", 0)
+                call_strike = c.get("call_strike", 0)
+                qty = c.get("quantity", 1)
+                mult = c.get("multiplier", 100)
+                status = c.get("cycle_status", "")
+
+                status_label = {
+                    "completed": "Called away",
+                    "stock_held": "Stock held",
+                    "incomplete": "No CC sold",
+                }.get(status, status)
 
                 detail_rows.append(html.Tr([
-                    html.Td(p.get("account", ""), style={"backgroundColor": bg, "textAlign": "left"}),
-                    html.Td(f"{p.get('right', 'P')}", style={"backgroundColor": bg}),
-                    html.Td(f"{p.get('strike', 0):,.0f}", style={"backgroundColor": bg}),
-                    html.Td(f"{p.get('assigned_shares', 0):,}", style={"backgroundColor": bg}),
-                    html.Td(p.get("close_date", ""), style={"backgroundColor": bg}),
-                    html.Td(f"{p.get('current_price', 0):,.2f}" if p.get("current_price") else "—", style={"backgroundColor": bg}),
-                    html.Td(f"${stock_pnl:,.0f}", style={"backgroundColor": bg, "color": stock_pnl_color}),
-                    html.Td(f"${p.get('realized_pnl', 0):,.0f}", style={"backgroundColor": bg}),
-                    html.Td(f"${row_pnl:,.0f}", style={"backgroundColor": bg, "color": row_pnl_color, "fontWeight": "bold"}),
+                    html.Td(c.get("account", ""), style={"backgroundColor": bg, "textAlign": "left"}),
+                    html.Td(f"{put_strike:,.0f}", style={"backgroundColor": bg}),
+                    html.Td(f"{call_strike:,.0f}" if call_strike else "—", style={"backgroundColor": bg}),
+                    html.Td(f"{qty}x{mult}", style={"backgroundColor": bg}),
+                    html.Td(c.get("put_assigned_date", ""), style={"backgroundColor": bg}),
+                    html.Td(f"${c.get('current_price', 0):,.2f}" if c.get("current_price") else "—", style={"backgroundColor": bg}),
+                    html.Td(f"${opnl:,.0f}", style={"backgroundColor": bg}),
+                    html.Td(f"${spnl:,.0f}", style={"backgroundColor": bg, "color": RISK_COLORS["SAFE"] if spnl >= 0 else RISK_COLORS["CRITICAL"]}),
+                    html.Td(f"${tpnl:,.0f}", style={"backgroundColor": bg, "color": RISK_COLORS["SAFE"] if tpnl >= 0 else RISK_COLORS["CRITICAL"], "fontWeight": "bold"}),
+                    html.Td(status_label, style={"backgroundColor": bg, "fontSize": "0.8rem"}),
                 ]))
 
             detail_table = dbc.Table(
                 [
                     html.Thead(html.Tr([
                         html.Th("Account", style={"textAlign": "left", "backgroundColor": "#253449", "color": "#f8fafc"}),
-                        html.Th("Right", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
-                        html.Th("Strike", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
-                        html.Th("Shares", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Put Strike", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Call Strike", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Qty", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
                         html.Th("Assigned", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
                         html.Th("Current", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
-                        html.Th("Stock P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
                         html.Th("Option P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
-                        html.Th("Net P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Stock P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Total P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Status", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
                     ])),
                     html.Tbody(detail_rows),
                 ],
