@@ -136,6 +136,8 @@ add_library(ibkr_core STATIC
     src/core/utils/price_fetcher.hpp
     src/core/utils/json_output.cpp
     src/core/utils/json_output.hpp
+    src/core/utils/subprocess.cpp
+    src/core/utils/subprocess.hpp
     src/core/services/flex_service.cpp
     src/core/services/flex_service.hpp
     src/core/services/import_service.cpp
@@ -160,6 +162,8 @@ add_library(ibkr_core STATIC
     src/core/services/trade_matcher.hpp
     src/core/services/trade_analytics_service.cpp
     src/core/services/trade_analytics_service.hpp
+    src/core/services/wheel_cycle_service.cpp
+    src/core/services/wheel_cycle_service.hpp
 )
 
 target_include_directories(ibkr_core PUBLIC
