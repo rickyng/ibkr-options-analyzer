@@ -49,6 +49,7 @@ struct WheelCycleDisplay {
     std::string cycle_status;
     int64_t put_round_trip_id{0};
     std::optional<int64_t> call_round_trip_id;
+    std::string currency{"USD"};
 };
 
 class WheelCycleService {

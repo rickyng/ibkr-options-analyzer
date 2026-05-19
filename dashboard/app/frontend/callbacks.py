@@ -12,22 +12,6 @@ from ..services.cli import run_cli, download_flex, import_csv, CliError
 from ..services.db import query, execute
 from .layout import RISK_COLORS, GRADE_COLORS, BG_CARD, TEXT_MUTED
 
-# FX rates to convert to USD (same as backend defaults)
-FX_RATES = {
-    "USD": 1.0,
-    "EUR": 1.08,
-    "GBP": 1.25,
-    "JPY": 0.0067,
-    "HKD": 0.13,
-    "CAD": 0.74,
-    "AUD": 0.65,
-    "CHF": 1.12,
-    "SGD": 0.75,
-}
-
-# Contract multiplier by market (JP options have multiplier of 1)
-CONTRACT_MULTIPLIER = {"US": 100, "HK": 100, "JP": 1}
-
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 
@@ -127,12 +111,16 @@ def _derive_market_from_symbol(underlying: str, multiplier: int | None = None) -
     return "US"
 
 
-def _convert_to_usd(amount: float, currency: str) -> float:
-    """Convert amount from given currency to USD using FX rates."""
+# FX rates for converting open position premiums to USD.
+# Trade P&L is now pre-converted by the CLI (currency="USD").
+_FX = {"USD": 1.0, "EUR": 1.08, "GBP": 1.25, "JPY": 0.0067, "HKD": 0.13, "CAD": 0.74, "AUD": 0.65, "CHF": 1.12, "SGD": 0.75}
+
+
+def _to_usd(amount: float, currency: str) -> float:
+    """Convert position-level amounts to USD. Trade P&L is already in USD from CLI."""
     if not amount or not currency:
         return amount
-    rate = FX_RATES.get(currency, 1.0)
-    return amount * rate
+    return amount * _FX.get(currency, 1.0)
 
 
 def _fetch_portfolio_risk(account: str | None = None) -> dict:
@@ -478,7 +466,7 @@ def register_callbacks(app: Dash) -> None:
 
         # Recompute summary from filtered positions
         premium = sum(
-            _convert_to_usd(
+            _to_usd(
                 abs(p.get("entry_premium", 0) * p.get("quantity", 1) * p.get("multiplier", 100)),
                 p.get("currency", "USD"),
             )
@@ -594,16 +582,18 @@ def register_callbacks(app: Dash) -> None:
 
         # Recompute wheel overview from filtered wheel cycles
         filtered_wheel_overview = {
-            "total_option_pnl": sum(wc.get("option_pnl", 0) for wc in wheel_cycles),
+            "total_option_pnl": sum(wc.get("option_pnl", 0) or 0 for wc in wheel_cycles),
             "total_stock_pnl": sum(wc.get("stock_pnl", 0) or 0 for wc in wheel_cycles),
-            "total_wheel_pnl": sum(wc.get("total_pnl", 0) for wc in wheel_cycles),
+            "total_wheel_pnl": sum(wc.get("wheel_pnl", 0) or 0 for wc in wheel_cycles),
             "completed_cycles": sum(1 for wc in wheel_cycles if wc.get("cycle_status") == "completed"),
             "stock_held_cycles": sum(1 for wc in wheel_cycles if wc.get("cycle_status") == "stock_held"),
             "incomplete_cycles": sum(1 for wc in wheel_cycles if wc.get("cycle_status") == "incomplete"),
         }
 
+        # Add non-assigned option P&L to get full Option P&L
+        non_assigned_pnl = sum(rt.get("realized_pnl", 0) for rt in round_trips if rt.get("close_reason") != "assigned")
+        total_option_pnl = filtered_wheel_overview["total_option_pnl"] + non_assigned_pnl
         total_stock_pnl = filtered_wheel_overview["total_stock_pnl"]
-        total_option_pnl = filtered_wheel_overview["total_option_pnl"]
         total_wheel_pnl = filtered_wheel_overview["total_wheel_pnl"]
 
         return {
@@ -620,7 +610,7 @@ def register_callbacks(app: Dash) -> None:
                 "total_option_pnl": total_option_pnl,
                 "total_stock_pnl": total_stock_pnl,
                 "total_wheel_pnl": total_wheel_pnl,
-                "total_pnl": total_pnl,
+                "total_pnl": total_option_pnl + total_stock_pnl + total_wheel_pnl,
                 "avg_winner": avg_winner,
                 "avg_loser": avg_loser,
                 "profit_factor": profit_factor,
@@ -660,12 +650,12 @@ def register_callbacks(app: Dash) -> None:
             currency = pos.get("currency", "USD") or "USD"
             multiplier = pos.get("multiplier", 100)
 
-            max_profit += _convert_to_usd(premium * multiplier * quantity, currency)
+            max_profit += _to_usd(premium * multiplier * quantity, currency)
 
-            loss_10pct += _convert_to_usd(
+            loss_10pct += _to_usd(
                 max(0, strike * 0.10 - premium) * multiplier * quantity, currency
             )
-            loss_20pct += _convert_to_usd(
+            loss_20pct += _to_usd(
                 max(0, strike * 0.20 - premium) * multiplier * quantity, currency
             )
 
@@ -875,8 +865,8 @@ def register_callbacks(app: Dash) -> None:
             strike = pos.get("strike", 0) or 0
             currency = pos.get("currency", "USD") or "USD"
             multiplier = pos.get("multiplier", 100)
-            exposure_map[underlying]["max_profit"] += _convert_to_usd(premium * multiplier * quantity, currency)
-            exposure_map[underlying]["max_loss"] += _convert_to_usd((strike * multiplier * quantity) - (premium * multiplier * quantity), currency) if quantity > 0 else 0
+            exposure_map[underlying]["max_profit"] += _to_usd(premium * multiplier * quantity, currency)
+            exposure_map[underlying]["max_loss"] += _to_usd((strike * multiplier * quantity) - (premium * multiplier * quantity), currency) if quantity > 0 else 0
 
         # Take top 10 by max_profit
         sorted_exposure = sorted(
@@ -1254,9 +1244,9 @@ def register_callbacks(app: Dash) -> None:
         multiplier = pos.get("multiplier", 100)
 
         # Convert to USD
-        strike_usd = _convert_to_usd(strike, currency)
-        premium_usd = _convert_to_usd(premium, currency)
-        current_price_usd = _convert_to_usd(current_price, currency) if current_price else 0
+        strike_usd = _to_usd(strike, currency)
+        premium_usd = _to_usd(premium, currency)
+        current_price_usd = _to_usd(current_price, currency) if current_price else 0
 
         # Breakeven for short put: strike - premium
         breakeven = strike_usd - premium_usd
@@ -1584,14 +1574,279 @@ def register_callbacks(app: Dash) -> None:
             })
         return rows
 
+    # --- Summary tab callbacks ---
+
+    @app.callback(
+        Output("sum-account-tabs", "children"),
+        Input("accounts-data", "data"),
+    )
+    def update_sum_account_tabs(accounts):
+        """Populate summary account tabs from API data."""
+        tabs = [dbc.Tab(label="All Accounts", tab_id="all")]
+        for acc in accounts:
+            name = acc.get("name", "")
+            tabs.append(dbc.Tab(label=name, tab_id=name))
+        return tabs
+
+    @app.callback(
+        Output("sum-combined-data", "data"),
+        [
+            Input("trade-review-data", "data"),
+            Input("positions-data", "data"),
+            Input("sum-account-tabs", "active_tab"),
+            Input("sum-market-filter", "value"),
+        ],
+    )
+    def apply_sum_filters(trade_data, positions, active_account, market):
+        """Combine trade review and open positions data, filtered by account/market."""
+        per_stock: dict[str, dict] = {}
+
+        if trade_data:
+            account = None if active_account == "all" else active_account
+
+            # 1. Wheel cycles: option + stock P&L for assigned trades
+            wheel_cycles = trade_data.get("wheel_cycles", [])
+            if account:
+                wheel_cycles = [wc for wc in wheel_cycles if wc.get("account") == account]
+            if market and market != "All Markets":
+                wheel_cycles = [wc for wc in wheel_cycles if _derive_market_from_symbol(wc.get("underlying", ""), wc.get("multiplier")) == market]
+
+            for wc in wheel_cycles:
+                ul = wc.get("underlying", "")
+                if ul not in per_stock:
+                    per_stock[ul] = {"underlying": ul, "market": _derive_market_from_symbol(ul), "trades": 0, "open_premium": 0.0, "option_pnl": 0.0, "stock_pnl": 0.0, "wheel_pnl": 0.0, "cycles": []}
+                per_stock[ul]["option_pnl"] += wc.get("option_pnl", 0) or 0
+                per_stock[ul]["stock_pnl"] += wc.get("stock_pnl", 0) or 0
+                per_stock[ul]["wheel_pnl"] += wc.get("wheel_pnl", 0) or 0
+                per_stock[ul]["cycles"].append(wc)
+
+            # 2. Non-assigned round-trips: pure option premium (expired/closed)
+            #    These are NOT in wheel cycles — add their P&L to option_pnl.
+            round_trips = trade_data.get("round_trips", [])
+            if account:
+                round_trips = [rt for rt in round_trips if rt.get("account") == account]
+            if market and market != "All Markets":
+                round_trips = [rt for rt in round_trips if _derive_market_from_symbol(rt.get("underlying", "")) == market]
+
+            for rt in round_trips:
+                ul = rt.get("underlying", "")
+                if ul not in per_stock:
+                    per_stock[ul] = {"underlying": ul, "market": _derive_market_from_symbol(ul), "trades": 0, "open_premium": 0.0, "option_pnl": 0.0, "stock_pnl": 0.0, "wheel_pnl": 0.0, "cycles": []}
+                per_stock[ul]["trades"] += 1
+                if rt.get("close_reason") != "assigned":
+                    per_stock[ul]["option_pnl"] += rt.get("realized_pnl", 0)
+
+        # Process open positions (potential P&L)
+        if positions:
+            filtered_positions = positions
+            account = None if active_account == "all" else active_account
+
+            if account:
+                filtered_positions = [p for p in filtered_positions if p.get("account_name") == account]
+            if market and market != "All Markets":
+                filtered_positions = [p for p in filtered_positions if p.get("market") == market]
+
+            for pos in filtered_positions:
+                ul = pos.get("underlying", "")
+                premium = pos.get("premium", 0) or 0
+                quantity = abs(pos.get("quantity", 0) or 0)
+                multiplier = pos.get("multiplier", 100)
+                currency = pos.get("currency", "USD") or "USD"
+                open_prem = _to_usd(premium * multiplier * quantity, currency)
+
+                if ul not in per_stock:
+                    per_stock[ul] = {"underlying": ul, "market": pos.get("market", _derive_market_from_symbol(ul)), "trades": 0, "open_premium": 0.0, "option_pnl": 0.0, "stock_pnl": 0.0, "wheel_pnl": 0.0, "cycles": []}
+                per_stock[ul]["open_premium"] += open_prem
+
+        # Build rows sorted by total_pnl descending
+        rows = []
+        for ul in per_stock.keys():
+            d = per_stock[ul]
+            total = d["option_pnl"] + d["stock_pnl"] + d["wheel_pnl"] + d["open_premium"]
+            rows.append({
+                "underlying": ul,
+                "market": d["market"],
+                "trades": d["trades"],
+                "open_premium": round(d["open_premium"], 2),
+                "option_pnl": round(d["option_pnl"], 2),
+                "stock_pnl": round(d["stock_pnl"], 2),
+                "wheel_pnl": round(d["wheel_pnl"], 2),
+                "total_pnl": round(total, 2),
+                "cycles": d.get("cycles", []),
+            })
+
+        # Sort by total_pnl descending
+        rows.sort(key=lambda r: r["total_pnl"], reverse=True)
+
+        totals = {
+            "option_pnl": round(sum(r["option_pnl"] for r in rows), 2),
+            "stock_pnl": round(sum(r["stock_pnl"] for r in rows), 2),
+            "wheel_pnl": round(sum(r["wheel_pnl"] for r in rows), 2),
+            "open_premium": round(sum(r["open_premium"] for r in rows), 2),
+            "total_pnl": round(sum(r["total_pnl"] for r in rows), 2),
+        }
+
+        return {"rows": rows, "totals": totals}
+
+    @app.callback(
+        [
+            Output("sum-card-total-pnl", "children"),
+            Output("sum-card-option-pnl", "children"),
+            Output("sum-card-stock-pnl", "children"),
+            Output("sum-card-wheel-pnl", "children"),
+        ],
+        Input("sum-combined-data", "data"),
+    )
+    def update_sum_cards(data):
+        """Update summary tab KPI cards."""
+        if not data or not data.get("totals"):
+            return "—", "—", "—", "—"
+        t = data["totals"]
+
+        def _fmt(val):
+            color = RISK_COLORS["SAFE"] if val >= 0 else RISK_COLORS["CRITICAL"]
+            return html.Span(f"${val:,.0f}", style={"color": color})
+
+        return _fmt(t["total_pnl"]), _fmt(t["option_pnl"]), _fmt(t["stock_pnl"]), _fmt(t["wheel_pnl"])
+
+    @app.callback(
+        Output("sum-per-stock-table", "children"),
+        Input("sum-combined-data", "data"),
+    )
+    def update_sum_table(data):
+        """Render per-stock P&L with expandable wheel cycle breakdown."""
+        if not data or not data.get("rows"):
+            return html.Div("No data", style={"color": "#94a3b8"})
+
+        rows = data["rows"]
+
+        def _pnl_color(val):
+            return RISK_COLORS["SAFE"] if val >= 0 else RISK_COLORS["CRITICAL"]
+
+        def _pnl_str(val):
+            return f"${val:,.0f}"
+
+        items = []
+        for r in rows:
+            cycles = r.get("cycles", [])
+            ul = r["underlying"]
+            opt = r["option_pnl"]
+            stk = r["stock_pnl"]
+            total = r["total_pnl"]
+            open_prem = r["open_premium"]
+            trades = r["trades"]
+            market = r.get("market", "")
+
+            # Header: underlying + summary stats
+            header_parts = [
+                html.Span(ul, style={"fontWeight": "bold", "fontSize": "1rem"}),
+            ]
+            if market:
+                header_parts.append(html.Span(f" ({market})", style={"marginLeft": "4px", "fontSize": "0.8rem", "color": TEXT_MUTED}))
+            if trades:
+                header_parts.append(html.Span(f"  {trades} trades", style={"marginLeft": "12px", "fontSize": "0.85rem", "color": TEXT_MUTED}))
+            if open_prem > 0:
+                header_parts.append(html.Span(f"  Open: ", style={"marginLeft": "16px", "fontSize": "0.9rem"}))
+                header_parts.append(html.Span(_pnl_str(open_prem), style={"color": _pnl_color(open_prem), "fontSize": "0.9rem"}))
+            header_parts.extend([
+                html.Span("  Opt: ", style={"marginLeft": "16px", "fontSize": "0.9rem"}),
+                html.Span(_pnl_str(opt), style={"color": _pnl_color(opt), "fontSize": "0.9rem"}),
+                html.Span(" + Stock: ", style={"fontSize": "0.9rem"}),
+                html.Span(_pnl_str(stk), style={"color": _pnl_color(stk), "fontSize": "0.9rem"}),
+                html.Span(" + Wheel: ", style={"fontSize": "0.9rem"}),
+                html.Span(_pnl_str(r["wheel_pnl"]), style={"color": _pnl_color(r["wheel_pnl"]), "fontSize": "0.9rem"}),
+                html.Span(" = ", style={"fontSize": "0.9rem"}),
+                html.Span(_pnl_str(total), style={"color": _pnl_color(total), "fontSize": "0.9rem", "fontWeight": "bold"}),
+            ])
+
+            header = html.Div(header_parts, style={"display": "flex", "alignItems": "center"})
+
+            if not cycles:
+                items.append(dbc.AccordionItem(
+                    html.Div("No wheel cycle detail", className="text-muted p-2"),
+                    title=header,
+                    item_id=f"sum-{ul}",
+                ))
+                continue
+
+            # Detail table: wheel cycle breakdown
+            detail_rows = []
+            for i, c in enumerate(cycles):
+                bg = BG_CARD if i % 2 == 0 else "#253449"
+                spnl = c.get("stock_pnl", 0) or 0
+                opnl = c.get("option_pnl", 0) or 0
+                wpnl = c.get("wheel_pnl", 0) or 0
+                tpnl = c.get("total_pnl", 0) or 0
+                put_strike = c.get("put_strike", 0)
+                call_strike = c.get("call_strike")
+                qty = c.get("quantity", 1)
+                mult = c.get("multiplier", 100)
+                status = c.get("cycle_status", "")
+
+                status_label = {
+                    "completed": "Called away",
+                    "stock_held": "Stock held",
+                    "incomplete": "No CC sold",
+                }.get(status, status)
+
+                detail_rows.append(html.Tr([
+                    html.Td(c.get("account", ""), style={"backgroundColor": bg, "textAlign": "left", "padding": "4px 8px"}),
+                    html.Td(f"{put_strike:,.0f}", style={"backgroundColor": bg, "textAlign": "right", "padding": "4px 8px"}),
+                    html.Td(f"{call_strike:,.0f}" if call_strike else "—", style={"backgroundColor": bg, "textAlign": "right", "padding": "4px 8px"}),
+                    html.Td(f"{qty}×{mult}", style={"backgroundColor": bg, "textAlign": "center", "padding": "4px 8px"}),
+                    html.Td(c.get("put_assigned_date", ""), style={"backgroundColor": bg, "textAlign": "center", "padding": "4px 8px"}),
+                    html.Td(f"${opnl:,.0f}", style={"backgroundColor": bg, "textAlign": "right", "padding": "4px 8px"}),
+                    html.Td(f"${spnl:,.0f}", style={"backgroundColor": bg, "textAlign": "right", "padding": "4px 8px", "color": _pnl_color(spnl)}),
+                    html.Td(f"${wpnl:,.0f}", style={"backgroundColor": bg, "textAlign": "right", "padding": "4px 8px", "color": _pnl_color(wpnl)}),
+                    html.Td(f"${tpnl:,.0f}", style={"backgroundColor": bg, "textAlign": "right", "padding": "4px 8px", "color": _pnl_color(tpnl), "fontWeight": "bold"}),
+                    html.Td(status_label, style={"backgroundColor": bg, "textAlign": "center", "padding": "4px 8px", "fontSize": "0.8rem"}),
+                ]))
+
+            detail_table = dbc.Table(
+                [
+                    html.Thead(html.Tr([
+                        html.Th("Account", style={"textAlign": "left", "backgroundColor": "#253449", "color": "#f8fafc", "padding": "4px 8px"}),
+                        html.Th("Put Strike", style={"backgroundColor": "#253449", "color": "#f8fafc", "padding": "4px 8px"}),
+                        html.Th("Call Strike", style={"backgroundColor": "#253449", "color": "#f8fafc", "padding": "4px 8px"}),
+                        html.Th("Qty", style={"backgroundColor": "#253449", "color": "#f8fafc", "padding": "4px 8px"}),
+                        html.Th("Assigned", style={"backgroundColor": "#253449", "color": "#f8fafc", "padding": "4px 8px"}),
+                        html.Th("Option P&L", style={"backgroundColor": "#253449", "color": "#f8fafc", "padding": "4px 8px"}),
+                        html.Th("Stock P&L", style={"backgroundColor": "#253449", "color": "#f8fafc", "padding": "4px 8px"}),
+                        html.Th("Wheel P&L", style={"backgroundColor": "#253449", "color": "#f8fafc", "padding": "4px 8px"}),
+                        html.Th("Total P&L", style={"backgroundColor": "#253449", "color": "#f8fafc", "padding": "4px 8px"}),
+                        html.Th("Status", style={"backgroundColor": "#253449", "color": "#f8fafc", "padding": "4px 8px"}),
+                    ])),
+                    html.Tbody(detail_rows),
+                ],
+                bordered=True,
+                className="mb-0",
+                style={"fontSize": "0.8rem"},
+            )
+
+            items.append(dbc.AccordionItem(
+                detail_table,
+                title=header,
+                item_id=f"sum-{ul}",
+            ))
+
+        return dbc.Accordion(
+            items,
+            always_open=True,
+            start_collapsed=True,
+            flush=True,
+            style={"backgroundColor": BG_CARD},
+        )
+
     # --- Trade Review tab callbacks ---
 
-    def _convert_trades_to_usd(data: dict) -> dict:
-        """Convert all P&L values in trade review data to USD.
+    def _enrich_trade_data(data: dict) -> dict:
+        """Enrich trade review data with live-price P&L for assigned/incomplete positions.
 
-        For assigned trades: Option P&L = premium only.
-        Stock P&L = assignment exposure at current market price.
-        Net P&L = option P&L + stock P&L.
+        CLI pre-converts all P&L to USD. This function only:
+        1. Adds assigned_stock_pnl via live prices for assigned trades
+        2. Enriches incomplete wheel cycles (no call sold) with unrealized stock P&L
+           - stock_held cycles keep CLI's stock_pnl (call_strike - put_strike)
+        3. Recomputes analytics (overview, monthly, strategy, DTE, etc.)
         """
         if not data:
             return data
@@ -1600,8 +1855,7 @@ def register_callbacks(app: Dash) -> None:
         if not trips:
             return data
 
-        # Derive actual multiplier from each round-trip's data
-        # (net_premium = qty × open_price × multiplier)
+        # Derive multiplier from each round-trip's data for live-price calculations
         for rt in trips:
             qty = abs(rt.get("quantity", 0))
             op = abs(rt.get("open_price", 0))
@@ -1609,12 +1863,9 @@ def register_callbacks(app: Dash) -> None:
             if qty > 0 and op > 0:
                 rt["_multiplier"] = round(np_val / (qty * op))
             else:
-                # Fallback to market-based multiplier when derivation fails
-                market = _derive_market_from_symbol(rt.get("underlying", ""))
-                rt["_multiplier"] = CONTRACT_MULTIPLIER.get(market, 100)
+                rt["_multiplier"] = 100
 
-        # Recalculate P&L for assigned trades: option P&L = premium only,
-        # stock P&L = assignment exposure at current market price, net = sum.
+        # Enrich assigned trades with live stock P&L
         assigned = [rt for rt in trips if rt.get("close_reason") == "assigned"]
         if assigned:
             underlyings = [s for s in set(rt.get("underlying", "") for rt in assigned) if s]
@@ -1628,10 +1879,8 @@ def register_callbacks(app: Dash) -> None:
                 price_rows = []
             prices = {r["symbol"]: r["price"] for r in price_rows}
 
-            # Fetch missing prices from Yahoo Finance
             missing = [s for s in underlyings if s not in prices]
             for symbol in missing:
-                # Derive market from symbol format for Yahoo mapping
                 sym_market = _derive_market_from_symbol(symbol)
                 price = _fetch_price_yahoo(symbol, sym_market)
                 if price is not None:
@@ -1642,60 +1891,53 @@ def register_callbacks(app: Dash) -> None:
                 strike = rt.get("strike", 0)
                 right = rt.get("right", "P")
                 qty = rt.get("quantity", 1)
-                open_price = rt.get("open_price", 0)
-                commission = rt.get("commission", 0)
                 multiplier = rt.get("_multiplier", 100)
                 currency = _derive_currency_from_symbol(underlying, int(multiplier))
 
-                # Option P&L is always just the premium received (regardless of current price)
-                option_pnl = qty * multiplier * open_price - commission
-                rt["realized_pnl"] = _convert_to_usd(option_pnl, currency)
-                rt["close_price"] = 0
-
-                # Stock P&L from assignment (only if current price available)
+                # realized_pnl is already in USD from CLI — keep it
                 current_price = prices.get(underlying)
                 if current_price is not None:
-                    # Short put assigned: bought stock at strike, P&L = (current - strike) × qty × mult
-                    # Short call assigned: sold stock at strike, P&L = (strike - current) × qty × mult
                     if right == "P":
                         stock_pnl = (current_price - strike) * qty * multiplier
                     else:
                         stock_pnl = (strike - current_price) * qty * multiplier
-                    rt["assigned_stock_pnl"] = _convert_to_usd(stock_pnl, currency)
+                    rt["assigned_stock_pnl"] = _to_usd(stock_pnl, currency)
                     rt["current_price"] = current_price
                 else:
                     rt["assigned_stock_pnl"] = 0
 
-                # Net P&L = Option + Stock
-                rt["net_pnl"] = rt["realized_pnl"] + rt.get("assigned_stock_pnl", 0)
+                rt["net_pnl"] = rt.get("realized_pnl", 0) + rt.get("assigned_stock_pnl", 0)
                 rt["assigned_shares"] = int(qty * multiplier)
 
-                # Recalculate ROC using net_pnl / collateral
                 collateral = strike * qty * multiplier
                 if collateral > 0:
                     rt["roc"] = (rt["net_pnl"] / collateral) * 100
 
-        # Enrich wheel_cycles with unrealized stock P&L for incomplete/stock_held
+        # Enrich wheel_cycles with Stock P&L (market price) and Wheel P&L (strike diff).
+        # Model:
+        #   - completed: stock called away → Stock P&L = 0, Wheel P&L = strike diff
+        #   - stock_held: call expired, still hold stock → Stock P&L = market price based, Wheel P&L = 0
+        #   - incomplete: no call sold → Stock P&L = market price based, Wheel P&L = 0
+        #   - total_pnl = option_pnl + stock_pnl + wheel_pnl
         wheel_cycles = data.get("wheel_cycles", [])
         if wheel_cycles:
-            # Collect underlyings with their market info (from cycle multiplier)
+            # Collect underlyings for stock_held + incomplete (need live prices for Stock P&L)
             wc_underlyings = set()
             wc_market_by_symbol = {}
             for wc in wheel_cycles:
-                if wc.get("cycle_status") in ("incomplete", "stock_held"):
+                if wc.get("cycle_status") in ("stock_held", "incomplete"):
                     ul = wc.get("underlying", "")
                     wc_underlyings.add(ul)
                     if ul not in wc_market_by_symbol:
                         mult = wc.get("multiplier", 100)
                         wc_market_by_symbol[ul] = _derive_market_from_symbol(ul, mult)
 
+            # Fetch live prices for stock_held + incomplete cycles
+            wc_prices = {}
             if wc_underlyings:
-                # Reuse prices dict from assigned trades, or fetch fresh
-                wc_prices = {}
                 if assigned:
                     wc_prices = {k: v for k, v in prices.items() if k in wc_underlyings}
 
-                # Fetch missing prices
                 missing_wc = [s for s in wc_underlyings if s not in wc_prices]
                 if missing_wc:
                     ph = ",".join("?" for _ in missing_wc)
@@ -1713,74 +1955,55 @@ def register_callbacks(app: Dash) -> None:
                     if price is not None:
                         wc_prices[symbol] = price
 
-                # Update incomplete/stock_held cycles with unrealized stock P&L
-                for wc in wheel_cycles:
-                    if wc.get("cycle_status") in ("incomplete", "stock_held"):
-                        underlying = wc.get("underlying", "")
-                        put_strike = wc.get("put_strike", 0)
-                        qty = wc.get("quantity", 1)
-                        mult = wc.get("multiplier", 100)
-                        current_price = wc_prices.get(underlying)
-                        currency = _derive_currency_from_symbol(underlying, mult)
+            # Process each wheel cycle
+            for wc in wheel_cycles:
+                status = wc.get("cycle_status", "")
+                ul = wc.get("underlying", "")
+                put_strike = wc.get("put_strike", 0)
+                qty = wc.get("quantity", 1)
+                mult = wc.get("multiplier", 100)
+                currency = _derive_currency_from_symbol(ul, mult)
 
-                        # Convert option_pnl to USD
-                        put_premium = wc.get("put_premium", 0) or 0
-                        call_premium = wc.get("call_premium", 0) or 0
-                        wc["option_pnl"] = _convert_to_usd(put_premium, currency) + _convert_to_usd(call_premium, currency)
+                if status == "completed":
+                    # Stock called away at call_strike
+                    # Wheel P&L = strike diff (already computed by CLI as stock_pnl)
+                    wc["wheel_pnl"] = wc.get("stock_pnl", 0) or 0
+                    wc["stock_pnl"] = 0  # No stock position
+                elif status in ("stock_held", "incomplete"):
+                    # Still holding stock → Stock P&L = market price based
+                    wc["wheel_pnl"] = 0  # Not completed
+                    current_price = wc_prices.get(ul)
+                    if current_price is not None:
+                        unrealized = (current_price - put_strike) * qty * mult
+                        wc["stock_pnl"] = _to_usd(unrealized, currency)
+                        wc["current_price"] = current_price
+                    else:
+                        wc["stock_pnl"] = 0
+                        wc["current_price"] = None
+                else:
+                    wc["wheel_pnl"] = 0
+                    wc["stock_pnl"] = 0
 
-                        if current_price is not None:
-                            unrealized = (current_price - put_strike) * qty * mult
-                            wc["stock_pnl"] = _convert_to_usd(unrealized, currency)
-                            wc["current_price"] = current_price
-                            wc["current_price_usd"] = _convert_to_usd(current_price, currency)
-                        else:
-                            wc["current_price"] = None
-                            wc["current_price_usd"] = None
+                # Recompute total: option + stock + wheel
+                wc["total_pnl"] = (wc.get("option_pnl", 0) or 0) + (wc.get("stock_pnl", 0) or 0) + (wc.get("wheel_pnl", 0) or 0)
 
-                        # Recalculate total_pnl (now both in USD)
-                        wc["total_pnl"] = (wc.get("stock_pnl") or 0) + wc.get("option_pnl", 0)
-
-                # Convert completed cycle P&L to USD
-                for wc in wheel_cycles:
-                    if wc.get("cycle_status") == "completed":
-                        underlying = wc.get("underlying", "")
-                        mult = wc.get("multiplier", 100)
-                        currency = _derive_currency_from_symbol(underlying, mult)
-                        wc["option_pnl"] = _convert_to_usd(wc.get("option_pnl", 0) or 0, currency)
-                        if wc.get("stock_pnl") is not None:
-                            wc["stock_pnl"] = _convert_to_usd(wc.get("stock_pnl", 0), currency)
-                        wc["total_pnl"] = (wc.get("stock_pnl") or 0) + wc.get("option_pnl", 0)
-
-            # Always recalculate wheel_overview from enriched cycles
-            completed_cycles = [wc for wc in wheel_cycles if wc.get("cycle_status") == "completed"]
-            stock_held_cycles = [wc for wc in wheel_cycles if wc.get("cycle_status") == "stock_held"]
-            incomplete_cycles = [wc for wc in wheel_cycles if wc.get("cycle_status") == "incomplete"]
-
+            # Recalculate wheel_overview from enriched cycles
             data["wheel_overview"] = {
-                "total_option_pnl": sum(wc.get("option_pnl", 0) for wc in wheel_cycles),
-                "total_stock_pnl": sum(wc.get("stock_pnl", 0) for wc in wheel_cycles),
-                "total_wheel_pnl": sum(wc.get("total_pnl", 0) for wc in wheel_cycles),
-                "completed_cycles": len(completed_cycles),
-                "stock_held_cycles": len(stock_held_cycles),
-                "incomplete_cycles": len(incomplete_cycles),
+                "total_option_pnl": sum(wc.get("option_pnl", 0) or 0 for wc in wheel_cycles),
+                "total_stock_pnl": sum(wc.get("stock_pnl", 0) or 0 for wc in wheel_cycles),
+                "total_wheel_pnl": sum(wc.get("wheel_pnl", 0) or 0 for wc in wheel_cycles),
+                "total_pnl": sum(wc.get("total_pnl", 0) or 0 for wc in wheel_cycles),
+                "completed_cycles": sum(1 for wc in wheel_cycles if wc.get("cycle_status") == "completed"),
+                "stock_held_cycles": sum(1 for wc in wheel_cycles if wc.get("cycle_status") == "stock_held"),
+                "incomplete_cycles": sum(1 for wc in wheel_cycles if wc.get("cycle_status") == "incomplete"),
             }
 
-        # Convert remaining P&L values to USD
+        # Clean up internal keys
         for rt in trips:
-            if rt.get("close_reason") != "assigned":
-                underlying = rt.get("underlying", "")
-                rt_mult = rt.get("_multiplier", 100)
-                currency = _derive_currency_from_symbol(underlying, int(rt_mult))
-                for key in ("realized_pnl", "net_premium"):
-                    if key in rt:
-                        rt[key] = _convert_to_usd(rt[key], currency)
-
-            # Clean up internal keys
             rt.pop("_multiplier", None)
 
-        # Recompute overview from converted round-trips
+        # Recompute overview from enriched round-trips
         if trips:
-            # Assignment-based classification: non-assigned = win, assigned = loss
             non_assigned = [t for t in trips if t.get("close_reason") != "assigned"]
             assigned_trips = [t for t in trips if t.get("close_reason") == "assigned"]
 
@@ -1788,7 +2011,6 @@ def register_callbacks(app: Dash) -> None:
             losing_trades = len(assigned_trips)
             win_rate = winning_trades / len(trips) if trips else 0
 
-            # Profit Factor: sum of non-assigned net_pnl / abs(sum of assigned net_pnl)
             non_assigned_pnl = sum(_rt_pnl(t) for t in non_assigned)
             assigned_pnl = sum(_rt_pnl(t) for t in assigned_trips)
             if assigned_pnl != 0:
@@ -1798,7 +2020,6 @@ def register_callbacks(app: Dash) -> None:
             else:
                 profit_factor = 0
 
-            # Avg ROC: use recalculated roc field (net_pnl / collateral)
             avg_roc = sum(t.get("roc", 0) for t in trips) / len(trips)
 
             pnls = [_rt_pnl(t) for t in trips]
@@ -1825,7 +2046,6 @@ def register_callbacks(app: Dash) -> None:
         # Monthly breakdown (YTD)
         from datetime import date as _date
         current_year = _date.today().year
-        # Normalize close_date to YYYY-MM format (handle both YYYY-MM-DD and YYYYMMDD)
         def _norm_month(cd: str) -> str:
             if not cd:
                 return ""
@@ -1862,7 +2082,7 @@ def register_callbacks(app: Dash) -> None:
                 "total_pnl": net,
             })
 
-        # Recompute strategy performance from converted round-trips
+        # Recompute strategy performance
         strat_map: dict[str, list] = {}
         for t in trips:
             st = t.get("strategy_type") or "Unknown"
@@ -1996,12 +2216,12 @@ def register_callbacks(app: Dash) -> None:
         Input("main-tabs", "active_tab"),
     )
     def load_trade_review_data(active_tab):
-        """Load trade review data when Trade Review tab is selected."""
-        if active_tab != "tab-trade-review":
+        """Load trade review data when Trade Review or Summary tab is selected."""
+        if active_tab not in ("tab-trade-review", "tab-summary"):
             return no_update
         try:
             data = run_cli("trades")
-            return _convert_trades_to_usd(data)
+            return _enrich_trade_data(data)
         except CliError:
             return {}
 
@@ -2025,7 +2245,7 @@ def register_callbacks(app: Dash) -> None:
             if account:
                 args.extend(["--account", account])
             data = run_cli("trades", *args)
-            data = _convert_trades_to_usd(data)
+            data = _enrich_trade_data(data)
             matched = data.get("overview", {}).get("total_trades", 0)
             return data, f"Matched {matched} round-trips", {"color": RISK_COLORS["SAFE"]}
         except CliError as e:
@@ -2200,9 +2420,10 @@ def register_callbacks(app: Dash) -> None:
             cycles = grouped[underlying]
 
             # Calculate totals for the group
-            total_stock_pnl = sum(c.get("stock_pnl", 0) for c in cycles)
-            total_option_pnl = sum(c.get("option_pnl", 0) for c in cycles)
-            total_pnl = sum(c.get("total_pnl", 0) for c in cycles)
+            total_stock_pnl = sum(c.get("stock_pnl", 0) or 0 for c in cycles)
+            total_option_pnl = sum(c.get("option_pnl", 0) or 0 for c in cycles)
+            total_wheel_pnl = sum(c.get("wheel_pnl", 0) or 0 for c in cycles)
+            total_pnl = sum(c.get("total_pnl", 0) or 0 for c in cycles)
             completed = sum(1 for c in cycles if c.get("cycle_status") == "completed")
             held = sum(1 for c in cycles if c.get("cycle_status") in ("stock_held", "incomplete"))
 
@@ -2222,6 +2443,8 @@ def register_callbacks(app: Dash) -> None:
                 html.Span(f"${total_option_pnl:,.0f}", style={"color": RISK_COLORS["SAFE"], "fontSize": "0.9rem"}),
                 html.Span(" + Stock: ", style={"fontSize": "0.9rem"}),
                 html.Span(f"${total_stock_pnl:,.0f}", style={"color": RISK_COLORS["SAFE"] if total_stock_pnl >= 0 else RISK_COLORS["CRITICAL"], "fontSize": "0.9rem"}),
+                html.Span(" + Wheel: ", style={"fontSize": "0.9rem"}),
+                html.Span(f"${total_wheel_pnl:,.0f}", style={"color": RISK_COLORS["SAFE"] if total_wheel_pnl >= 0 else RISK_COLORS["CRITICAL"], "fontSize": "0.9rem"}),
                 html.Span(" = ", style={"fontSize": "0.9rem"}),
                 html.Span(f"${total_pnl:,.0f}", style={"color": pnl_color, "fontSize": "0.9rem", "fontWeight": "bold"}),
             ], style={"display": "flex", "alignItems": "center"})
@@ -2232,6 +2455,7 @@ def register_callbacks(app: Dash) -> None:
                 bg = BG_CARD if i % 2 == 0 else "#253449"
                 spnl = c.get("stock_pnl", 0)
                 opnl = c.get("option_pnl", 0)
+                wpnl = c.get("wheel_pnl", 0) or 0
                 tpnl = c.get("total_pnl", 0)
                 put_strike = c.get("put_strike", 0)
                 call_strike = c.get("call_strike", 0)
@@ -2254,6 +2478,7 @@ def register_callbacks(app: Dash) -> None:
                     html.Td(f"${c.get('current_price_usd', 0):,.2f}" if c.get("current_price_usd") is not None else (f"${c.get('current_price', 0):,.2f}" if c.get("current_price") else "—"), style={"backgroundColor": bg}),
                     html.Td(f"${opnl:,.0f}", style={"backgroundColor": bg}),
                     html.Td(f"${spnl:,.0f}", style={"backgroundColor": bg, "color": RISK_COLORS["SAFE"] if spnl >= 0 else RISK_COLORS["CRITICAL"]}),
+                    html.Td(f"${wpnl:,.0f}", style={"backgroundColor": bg, "color": RISK_COLORS["SAFE"] if wpnl >= 0 else RISK_COLORS["CRITICAL"]}),
                     html.Td(f"${tpnl:,.0f}", style={"backgroundColor": bg, "color": RISK_COLORS["SAFE"] if tpnl >= 0 else RISK_COLORS["CRITICAL"], "fontWeight": "bold"}),
                     html.Td(status_label, style={"backgroundColor": bg, "fontSize": "0.8rem"}),
                 ]))
@@ -2269,6 +2494,7 @@ def register_callbacks(app: Dash) -> None:
                         html.Th("Current", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
                         html.Th("Option P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
                         html.Th("Stock P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
+                        html.Th("Wheel P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
                         html.Th("Total P&L", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
                         html.Th("Status", style={"backgroundColor": "#253449", "color": "#f8fafc"}),
                     ])),

@@ -34,6 +34,7 @@ struct RoundTripDisplay {
     std::string close_date;
     int holding_days{0};
     double open_price{0.0};
+    double close_price{0.0};
     double net_premium{0.0};
     double realized_pnl{0.0};
     double commission{0.0};
@@ -41,6 +42,8 @@ struct RoundTripDisplay {
     double annualized_return{0.0};
     std::string close_reason;
     std::string strategy_type;
+    std::string currency{"USD"};
+    int multiplier{100};
 };
 
 struct StrategyPerformance {
@@ -132,7 +135,7 @@ public:
         const std::string& date_to = "");
 
 private:
-    static double calculate_roc(const db::Database::RoundTrip& rt);
+    static double calculate_roc(const db::Database::RoundTrip& rt, int multiplier = 100);
     static std::string get_dte_bucket(int holding_days);
 
     db::Database& database_;

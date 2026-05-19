@@ -5,6 +5,7 @@
 #include "services/snapshot_service.hpp"
 #include "db/database.hpp"
 #include "utils/logger.hpp"
+#include "utils/currency.hpp"
 #include "utils/subprocess.hpp"
 #include <iostream>
 #include <iomanip>
@@ -79,6 +80,7 @@ Result<void> TradesCommand::execute(
     const auto& overview = *overview_result;
 
     if (output_opts.json || output_opts.google_sheet) {
+        utils::CurrencyConverter converter;
         json output;
         output["overview"] = {
             {"total_trades", overview.total_trades},
@@ -99,16 +101,21 @@ Result<void> TradesCommand::execute(
         if (trips_result) {
             json trips_arr = json::array();
             for (const auto& rt : *trips_result) {
+                double realized_pnl_usd = converter.convert(rt.realized_pnl, rt.currency);
+                double net_premium_usd = converter.convert(rt.net_premium, rt.currency);
+                double open_price_usd = converter.convert(rt.open_price, rt.currency);
                 trips_arr.push_back({
                     {"id", rt.id}, {"account", rt.account_name},
                     {"underlying", rt.underlying}, {"strike", rt.strike},
                     {"right", std::string(1, rt.right)}, {"expiry", rt.expiry},
                     {"quantity", rt.quantity}, {"open_date", rt.open_date},
                     {"close_date", rt.close_date}, {"holding_days", rt.holding_days},
-                    {"open_price", rt.open_price}, {"commission", rt.commission},
-                    {"net_premium", rt.net_premium}, {"realized_pnl", rt.realized_pnl},
+                    {"open_price", open_price_usd}, {"close_price", converter.convert(rt.close_price, rt.currency)},
+                    {"commission", converter.convert(rt.commission, rt.currency)},
+                    {"net_premium", net_premium_usd}, {"realized_pnl", realized_pnl_usd},
                     {"roc", rt.roc}, {"annualized_return", rt.annualized_return},
-                    {"close_reason", rt.close_reason}, {"strategy_type", rt.strategy_type}
+                    {"close_reason", rt.close_reason}, {"strategy_type", rt.strategy_type},
+                    {"currency", "USD"}, {"multiplier", rt.multiplier}
                 });
             }
             output["round_trips"] = trips_arr;
@@ -201,6 +208,10 @@ Result<void> TradesCommand::execute(
         if (wheel_cycles) {
             json wc_arr = json::array();
             for (const auto& wc : *wheel_cycles) {
+                double put_prem_usd = converter.convert(wc.put_premium, wc.currency);
+                double opt_pnl_usd = converter.convert(wc.option_pnl, wc.currency);
+                double stk_pnl_usd = wc.stock_pnl.has_value() ? converter.convert(*wc.stock_pnl, wc.currency) : 0.0;
+                double tot_pnl_usd = opt_pnl_usd + stk_pnl_usd;
                 json wc_obj = {
                     {"id", wc.id},
                     {"account", wc.account_name},
@@ -209,15 +220,16 @@ Result<void> TradesCommand::execute(
                     {"call_strike", wc.call_strike.has_value() ? json(wc.call_strike.value()) : json(nullptr)},
                     {"quantity", wc.quantity},
                     {"multiplier", wc.multiplier},
-                    {"put_premium", wc.put_premium},
-                    {"call_premium", wc.call_premium.has_value() ? json(wc.call_premium.value()) : json(nullptr)},
-                    {"stock_pnl", wc.stock_pnl.has_value() ? json(wc.stock_pnl.value()) : json(nullptr)},
-                    {"option_pnl", wc.option_pnl},
-                    {"total_pnl", wc.total_pnl},
+                    {"put_premium", put_prem_usd},
+                    {"call_premium", wc.call_premium.has_value() ? json(converter.convert(*wc.call_premium, wc.currency)) : json(nullptr)},
+                    {"stock_pnl", wc.stock_pnl.has_value() ? json(stk_pnl_usd) : json(nullptr)},
+                    {"option_pnl", opt_pnl_usd},
+                    {"total_pnl", tot_pnl_usd},
                     {"put_assigned_date", wc.put_assigned_date},
                     {"call_close_date", wc.call_close_date},
                     {"call_close_reason", wc.call_close_reason},
-                    {"cycle_status", wc.cycle_status}
+                    {"cycle_status", wc.cycle_status},
+                    {"currency", "USD"}
                 };
                 wc_arr.push_back(wc_obj);
             }

@@ -48,6 +48,7 @@ struct MatchedRoundTrip {
     double net_premium{0.0};
     double commission{0.0};
     double realized_pnl{0.0};
+    double multiplier{100.0};
     std::string close_reason;
     std::string match_method;
     std::vector<std::pair<int64_t, int>> open_legs;   // (trade_id, matched_quantity)

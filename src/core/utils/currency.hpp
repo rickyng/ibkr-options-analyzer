@@ -35,7 +35,7 @@ private:
     std::string base_currency_{"USD"};
     std::map<std::string, double> rates_{
         {"USD", 1.0},
-        {"HKD", 0.128},
+        {"HKD", 0.13},
         {"JPY", 0.0067},
         {"EUR", 1.08},
         {"GBP", 1.25},

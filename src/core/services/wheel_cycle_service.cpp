@@ -41,6 +41,11 @@ int WheelCycleService::derive_multiplier(const std::string& underlying) {
 }
 
 int WheelCycleService::derive_multiplier_from_data(const db::Database::RoundTrip& rt) {
+    // Use stored multiplier from the trade data (via IBKR Flex)
+    if (rt.multiplier > 0 && rt.multiplier != 100.0) {
+        return static_cast<int>(rt.multiplier);
+    }
+    // Fallback: derive from P&L data
     double qty = std::abs(rt.quantity);
     double open_price = std::abs(rt.open_price);
     double net_premium = std::abs(rt.net_premium);
@@ -48,7 +53,7 @@ int WheelCycleService::derive_multiplier_from_data(const db::Database::RoundTrip
         int derived = static_cast<int>(std::round(net_premium / (qty * open_price)));
         if (derived > 0) return derived;
     }
-    return derive_multiplier(rt.underlying);
+    return 100;
 }
 
 Result<int> WheelCycleService::build_wheel_cycles(int64_t account_id) {
@@ -282,6 +287,7 @@ Result<std::vector<WheelCycleDisplay>> WheelCycleService::get_wheel_cycles(
         d.cycle_status = cycle.cycle_status;
         d.put_round_trip_id = cycle.put_round_trip_id;
         d.call_round_trip_id = cycle.call_round_trip_id;
+        d.currency = utils::deduce_currency(cycle.underlying);
         displays.push_back(d);
     }
 

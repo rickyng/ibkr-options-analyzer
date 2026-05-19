@@ -1,4 +1,5 @@
 #include "trade_analytics_service.hpp"
+#include "utils/currency.hpp"
 #include "utils/logger.hpp"
 #include <algorithm>
 #include <cmath>
@@ -132,10 +133,14 @@ Result<std::vector<RoundTripDisplay>> TradeAnalyticsService::get_round_trips(
         d.close_date = rt.close_date;
         d.holding_days = rt.holding_days;
         d.open_price = rt.open_price;
+        d.close_price = rt.close_price;
         d.net_premium = rt.net_premium;
         d.realized_pnl = rt.realized_pnl;
         d.commission = rt.commission;
-        d.roc = calculate_roc(rt);
+        d.currency = utils::deduce_currency(rt.underlying);
+        d.multiplier = static_cast<int>(rt.multiplier);
+        if (d.multiplier == 0) d.multiplier = 100;  // fallback
+        d.roc = calculate_roc(rt, d.multiplier);
         d.annualized_return = rt.holding_days > 0
                                   ? (d.roc * 365.0 / static_cast<double>(rt.holding_days))
                                   : 0.0;
@@ -473,8 +478,8 @@ Result<LossStreakInfo> TradeAnalyticsService::get_streak_info(
 // Static helpers
 // ---------------------------------------------------------------------------
 
-double TradeAnalyticsService::calculate_roc(const db::Database::RoundTrip& rt) {
-    double collateral = rt.strike * static_cast<double>(rt.quantity) * 100.0;
+double TradeAnalyticsService::calculate_roc(const db::Database::RoundTrip& rt, int multiplier) {
+    double collateral = rt.strike * static_cast<double>(rt.quantity) * static_cast<double>(multiplier);
     if (collateral == 0.0) {
         return 0.0;
     }

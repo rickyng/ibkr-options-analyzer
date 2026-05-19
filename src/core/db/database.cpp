@@ -88,6 +88,19 @@ Result<void> Database::initialize() {
             }
         }
 
+        // Migration: add multiplier to round_trips
+        try {
+            SQLite::Statement check(*db_, "SELECT multiplier FROM round_trips LIMIT 1");
+            try { check.executeStep(); } catch (const SQLite::Exception&) {}
+        } catch (const SQLite::Exception&) {
+            Logger::info("Running migration: adding multiplier column to round_trips");
+            try {
+                db_->exec("ALTER TABLE round_trips ADD COLUMN multiplier REAL NOT NULL DEFAULT 100.0");
+            } catch (const std::exception& e) {
+                return Error{"Failed to add multiplier column to round_trips", std::string(e.what())};
+            }
+        }
+
         initialized_ = true;
         Logger::info("Database initialized successfully");
 
@@ -596,9 +609,9 @@ Result<int64_t> Database::insert_round_trip(const RoundTrip& round_trip) {
             "INSERT INTO round_trips "
             "(account_id, underlying, strike, right, expiry, quantity, "
             "open_date, close_date, holding_days, open_price, close_price, "
-            "net_premium, commission, realized_pnl, close_reason, match_method, "
+            "net_premium, commission, realized_pnl, multiplier, close_reason, match_method, "
             "strategy_type, strategy_group_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         q.bind(1, round_trip.account_id);
         q.bind(2, round_trip.underlying);
         q.bind(3, round_trip.strike);
@@ -613,17 +626,18 @@ Result<int64_t> Database::insert_round_trip(const RoundTrip& round_trip) {
         q.bind(12, round_trip.net_premium);
         q.bind(13, round_trip.commission);
         q.bind(14, round_trip.realized_pnl);
-        q.bind(15, round_trip.close_reason);
-        q.bind(16, round_trip.match_method);
+        q.bind(15, round_trip.multiplier);
+        q.bind(16, round_trip.close_reason);
+        q.bind(17, round_trip.match_method);
         if (round_trip.strategy_type.empty()) {
-            q.bind(17);
+            q.bind(18);
         } else {
-            q.bind(17, round_trip.strategy_type);
+            q.bind(18, round_trip.strategy_type);
         }
         if (round_trip.strategy_group_id.has_value()) {
-            q.bind(18, *round_trip.strategy_group_id);
+            q.bind(19, *round_trip.strategy_group_id);
         } else {
-            q.bind(18);
+            q.bind(19);
         }
         q.exec();
         int64_t id = db_->getLastInsertRowid();
@@ -663,7 +677,7 @@ Result<std::vector<Database::RoundTrip>> Database::get_round_trips(
         std::string sql =
             "SELECT id, account_id, underlying, strike, right, expiry, quantity, "
             "open_date, close_date, holding_days, open_price, close_price, "
-            "net_premium, commission, realized_pnl, close_reason, match_method, "
+            "net_premium, commission, realized_pnl, multiplier, close_reason, match_method, "
             "strategy_type, strategy_group_id "
             "FROM round_trips WHERE 1=1";
 
@@ -701,13 +715,15 @@ Result<std::vector<Database::RoundTrip>> Database::get_round_trips(
             rt.net_premium = q.getColumn(12).getDouble();
             rt.commission = q.getColumn(13).getDouble();
             rt.realized_pnl = q.getColumn(14).getDouble();
-            rt.close_reason = q.getColumn(15).getString();
-            rt.match_method = q.getColumn(16).getString();
-            auto strategy_type_col = q.getColumn(17);
+            rt.multiplier = q.getColumn(15).getDouble();
+            if (rt.multiplier == 0.0) rt.multiplier = 100.0;
+            rt.close_reason = q.getColumn(16).getString();
+            rt.match_method = q.getColumn(17).getString();
+            auto strategy_type_col = q.getColumn(18);
             if (!strategy_type_col.isNull()) {
                 rt.strategy_type = strategy_type_col.getString();
             }
-            auto sg_col = q.getColumn(18);
+            auto sg_col = q.getColumn(19);
             if (!sg_col.isNull()) {
                 rt.strategy_group_id = sg_col.getInt64();
             }

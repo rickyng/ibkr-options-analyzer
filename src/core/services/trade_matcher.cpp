@@ -277,6 +277,7 @@ std::optional<MatchedRoundTrip> TradeMatcher::match_single_closing_trade(
     rt.holding_days = 0;
     rt.close_price = 0;  // Expired worthless
     rt.commission = trade.commission;
+    rt.multiplier = trade.multiplier;
     rt.match_method = "single_trade";
     rt.close_reason = "expired";
 
@@ -345,6 +346,7 @@ TradeMatcher::match_contract_fifo(std::vector<TradeForMatch>& trades) {
                 rt.open_price = front.trade.trade_price;
                 rt.close_price = trade.trade_price;
                 rt.commission = front.trade.commission + trade.commission;
+                rt.multiplier = front.trade.multiplier;
                 rt.close_reason = detect_close_reason(rt.close_date, rt.expiry);
                 rt.match_method = "trade_match";
 
@@ -515,6 +517,7 @@ Result<int> TradeMatcher::write_round_trips(
         db_rt.net_premium = rt.net_premium;
         db_rt.commission = rt.commission;
         db_rt.realized_pnl = rt.realized_pnl;
+        db_rt.multiplier = rt.multiplier;
         db_rt.close_reason = rt.close_reason;
         db_rt.match_method = rt.match_method;
 

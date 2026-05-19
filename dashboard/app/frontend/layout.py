@@ -47,6 +47,69 @@ def _summary_card(title: str, value_id: str) -> dbc.Card:
     )
 
 
+def _summary_tab() -> dbc.Tab:
+    """Summary tab: consolidated P&L across trades and open positions."""
+    return dbc.Tab(
+        label="Summary",
+        tab_id="tab-summary",
+        children=[
+            # Account filter tabs
+            dbc.Tabs(
+                id="sum-account-tabs",
+                children=[
+                    dbc.Tab(label="All Accounts", tab_id="all"),
+                ],
+                active_tab="all",
+                className="mb-3",
+            ),
+
+            # Market filter
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Select(
+                            id="sum-market-filter",
+                            options=[
+                                {"label": "All Markets", "value": "All Markets"},
+                                {"label": "US", "value": "US"},
+                                {"label": "HK", "value": "HK"},
+                                {"label": "JP", "value": "JP"},
+                            ],
+                            value="All Markets",
+                            style={"width": "160px"},
+                        ),
+                        width="auto",
+                    ),
+                ],
+                className="mb-3 g-2",
+            ),
+
+            # Summary cards
+            dbc.Row(
+                [
+                    dbc.Col(_summary_card("Total P&L", "sum-card-total-pnl"), width=3),
+                    dbc.Col(_summary_card("Option P&L", "sum-card-option-pnl"), width=2),
+                    dbc.Col(_summary_card("Stock P&L", "sum-card-stock-pnl"), width=2),
+                    dbc.Col(_summary_card("Wheel P&L", "sum-card-wheel-pnl"), width=2),
+                ],
+                className="mb-4 justify-content-center",
+            ),
+
+            # Per-stock P&L table
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H5("P&L by Underlying", className="mb-3", style={"color": "#f8fafc"}),
+                        html.Div(id="sum-per-stock-table"),
+                    ]
+                ),
+                style={"backgroundColor": BG_CARD, "border": "none"},
+                className="mb-4",
+            ),
+        ],
+    )
+
+
 def _positions_tab() -> dbc.Tab:
     """The existing positions dashboard content."""
     return dbc.Tab(
@@ -922,6 +985,7 @@ def create_layout() -> dbc.Container:
             dcc.Store(id="trade-review-data", data={}),
             dcc.Store(id="tr-filtered-data", data={}),
             dcc.Store(id="trade-list-data", data=[]),
+            dcc.Store(id="sum-combined-data", data={}),
 
             # One-shot interval to trigger initial data load
             dcc.Interval(id="load-trigger", interval=500, max_intervals=1),
@@ -930,6 +994,7 @@ def create_layout() -> dbc.Container:
             dbc.Tabs(
                 id="main-tabs",
                 children=[
+                    _summary_tab(),
                     _positions_tab(),
                     _portfolio_tab(),
                     _trade_review_tab(),
