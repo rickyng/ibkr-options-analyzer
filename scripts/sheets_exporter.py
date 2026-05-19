@@ -32,6 +32,10 @@ SPREADSHEET_TITLE = "IBKR Options Analyzer"
 
 # FX rates for currency conversion
 FX_RATES = {"USD": 1.0, "JPY": 0.0067, "HKD": 0.13, "EUR": 1.08, "GBP": 1.25}
+
+# Contract multiplier by market (JP options have multiplier of 1)
+CONTRACT_MULTIPLIER = {"US": 100, "HK": 100, "JP": 1}
+
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 # ── Format Types ────────────────────────────────────────────────
@@ -143,17 +147,214 @@ def fetch_price(symbol: str) -> float | None:
     return None
 
 
-def currency_for_symbol(underlying: str) -> str:
+def currency_for_symbol(underlying: str, multiplier: int | None = None) -> str:
     if underlying.endswith(".T"):
         return "JPY"
     core = underlying.replace(".HK", "").replace(".T", "")
     if core.isdigit():
+        # JP stocks have multiplier=1, HK stocks have multiplier=100
+        if multiplier is not None and multiplier == 1:
+            return "JPY"
         return "HKD"
     return "USD"
 
 
+def market_for_symbol(underlying: str, multiplier: int | None = None) -> str:
+    if not underlying:
+        return "US"
+    if underlying.endswith(".T"):
+        return "JP"
+    core = underlying.replace(".HK", "").replace(".T", "")
+    if core.isdigit():
+        if multiplier is not None and multiplier == 1:
+            return "JP"
+        return "HK"
+    return "US"
+
+
 def convert_to_usd(amount: float, currency: str) -> float:
     return amount * FX_RATES.get(currency, 1.0)
+
+
+def rt_pnl(rt: dict) -> float:
+    """Effective P&L for a round-trip, preferring net_pnl over realized_pnl."""
+    if "net_pnl" in rt:
+        return rt["net_pnl"]
+    return rt.get("realized_pnl", 0) or 0
+
+
+def convert_trades_to_usd(data: dict):
+    """Convert all P&L values to USD (matches web UI _convert_trades_to_usd)."""
+    trips = data.get("round_trips", [])
+    if not trips:
+        return
+
+    # Derive actual multiplier from each round-trip
+    for rt in trips:
+        qty = abs(rt.get("quantity", 0) or 0)
+        op = abs(rt.get("open_price", 0) or 0)
+        np_val = abs(rt.get("net_premium", 0) or 0)
+        if qty > 0 and op > 0:
+            rt["_multiplier"] = round(np_val / (qty * op))
+        else:
+            rt_mult = rt.get("_multiplier", 100)
+            market = market_for_symbol(rt.get("underlying", ""), int(rt_mult))
+            rt["_multiplier"] = CONTRACT_MULTIPLIER.get(market, 100)
+
+    # Recalculate P&L for assigned trades
+    assigned = [rt for rt in trips if rt.get("close_reason") == "assigned"]
+    prices = {}
+    if assigned:
+        underlyings = {rt.get("underlying", "") for rt in assigned if rt.get("underlying")}
+        for sym in underlyings:
+            p = fetch_price(sym)
+            if p is not None:
+                prices[sym] = p
+
+    for rt in assigned:
+        underlying = rt.get("underlying", "")
+        strike = rt.get("strike", 0) or 0
+        right = rt.get("right", "P")
+        qty = rt.get("quantity", 1) or 1
+        open_price = rt.get("open_price", 0) or 0
+        commission = rt.get("commission", 0) or 0
+        multiplier = rt.get("_multiplier", 100)
+        currency = currency_for_symbol(underlying, int(multiplier))
+
+        option_pnl = qty * multiplier * open_price - commission
+        rt["realized_pnl"] = convert_to_usd(option_pnl, currency)
+        rt["close_price"] = 0
+
+        current_price = prices.get(underlying)
+        if current_price is not None:
+            if right == "P":
+                stock_pnl = (current_price - strike) * qty * multiplier
+            else:
+                stock_pnl = (strike - current_price) * qty * multiplier
+            rt["assigned_stock_pnl"] = convert_to_usd(stock_pnl, currency)
+            rt["current_price"] = current_price
+        else:
+            rt["assigned_stock_pnl"] = 0
+
+        rt["net_pnl"] = rt["realized_pnl"] + rt.get("assigned_stock_pnl", 0)
+        rt["assigned_shares"] = int(qty * multiplier)
+        collateral = strike * qty * multiplier
+        if collateral > 0:
+            rt["roc"] = (rt["net_pnl"] / collateral) * 100
+
+    # Convert non-assigned P&L
+    for rt in trips:
+        if rt.get("close_reason") != "assigned":
+            underlying = rt.get("underlying", "")
+            rt_mult = rt.get("_multiplier", 100)
+            currency = currency_for_symbol(underlying, int(rt_mult))
+            for key in ("realized_pnl", "net_premium"):
+                if key in rt:
+                    rt[key] = convert_to_usd(rt[key] or 0, currency)
+        rt.pop("_multiplier", None)
+
+    # Recompute overview
+    if trips:
+        non_assigned = [t for t in trips if t.get("close_reason") != "assigned"]
+        assigned_trips = [t for t in trips if t.get("close_reason") == "assigned"]
+        winning = len(non_assigned)
+        losing = len(assigned_trips)
+        non_assigned_pnl = sum(rt_pnl(t) for t in non_assigned)
+        assigned_pnl = sum(rt_pnl(t) for t in assigned_trips)
+        total_pnl = non_assigned_pnl + assigned_pnl
+
+        if assigned_pnl != 0:
+            profit_factor = non_assigned_pnl / abs(assigned_pnl)
+        elif non_assigned_pnl > 0:
+            profit_factor = float("inf")
+        else:
+            profit_factor = 0
+
+        pnls = [rt_pnl(t) for t in trips]
+        holding_days = [t.get("holding_days", 0) for t in trips if t.get("holding_days")]
+        avg_roc = sum(t.get("roc", 0) or 0 for t in trips) / len(trips)
+
+        data["overview"] = {
+            "total_trades": len(trips),
+            "winning_trades": winning,
+            "losing_trades": losing,
+            "win_rate": winning / len(trips) if trips else 0,
+            "total_option_pnl": sum(t.get("realized_pnl", 0) or 0 for t in trips),
+            "total_stock_pnl": sum(t.get("assigned_stock_pnl", 0) or 0 for t in trips),
+            "total_pnl": total_pnl,
+            "avg_winner": non_assigned_pnl / winning if winning else 0,
+            "avg_loser": abs(assigned_pnl) / losing if losing else 0,
+            "profit_factor": profit_factor,
+            "expectancy": total_pnl / len(trips) if trips else 0,
+            "avg_holding_days": sum(holding_days) / len(holding_days) if holding_days else 0,
+            "avg_roc": avg_roc,
+            "avg_annualized_return": sum(t.get("annualized_return", 0) or 0 for t in trips) / len(trips),
+        }
+
+    # Recompute strategy performance
+    strat_map = {}
+    for t in trips:
+        st = t.get("strategy_type") or "Unknown"
+        strat_map.setdefault(st, []).append(t)
+    data["strategy_performance"] = []
+    for st, st_trips in sorted(strat_map.items()):
+        st_pnls = [rt_pnl(t) for t in st_trips]
+        st_wins = [p for p in st_pnls if p >= 0]
+        st_losses = [p for p in st_pnls if p < 0]
+        st_total = sum(st_pnls)
+        st_total_wins = sum(st_wins)
+        st_total_losses = abs(sum(st_losses))
+        st_days = [t.get("holding_days", 0) for t in st_trips if t.get("holding_days")]
+        data["strategy_performance"].append({
+            "strategy_type": st,
+            "trade_count": len(st_trips),
+            "winning_trades": len(st_wins),
+            "win_rate": len(st_wins) / len(st_trips) if st_trips else 0,
+            "total_pnl": st_total,
+            "avg_pnl": st_total / len(st_trips) if st_trips else 0,
+            "profit_factor": st_total_wins / st_total_losses if st_total_losses else 0,
+            "avg_holding_days": sum(st_days) / len(st_days) if st_days else 0,
+        })
+
+    # Recompute monthly breakdown (YTD)
+    current_year = date.today().year
+    month_names = {
+        "01": "Jan", "02": "Feb", "03": "Mar", "04": "Apr",
+        "05": "May", "06": "Jun", "07": "Jul", "08": "Aug",
+        "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dec",
+    }
+
+    def _norm_month(cd):
+        if not cd:
+            return ""
+        if "-" in cd:
+            return cd[:7]
+        elif len(cd) >= 6:
+            return cd[:4] + "-" + cd[4:6]
+        return cd
+
+    month_map = {}
+    for t in trips:
+        cd = _norm_month(t.get("close_date", ""))
+        if not cd or int(cd[:4]) != current_year:
+            continue
+        month_map.setdefault(cd, []).append(t)
+
+    data["monthly_breakdown"] = []
+    for month_key in sorted(month_map.keys()):
+        m_trips = month_map[month_key]
+        opt_pnl = sum(t.get("realized_pnl", 0) or 0 for t in m_trips)
+        stk_pnl = sum(t.get("assigned_stock_pnl", 0) or 0 for t in m_trips)
+        net = sum(rt_pnl(t) for t in m_trips)
+        m_wins = [t for t in m_trips if rt_pnl(t) >= 0]
+        data["monthly_breakdown"].append({
+            "month": f"{month_names.get(month_key[5:], month_key)} {month_key[:4]}",
+            "trade_count": len(m_trips),
+            "winning_trades": len(m_wins),
+            "win_rate": len(m_wins) / len(m_trips) if m_trips else 0,
+            "total_pnl": net,
+            "avg_pnl": net / len(m_trips) if m_trips else 0,
+        })
 
 
 def enrich_wheel_cycles(data: dict):
@@ -183,15 +384,27 @@ def enrich_wheel_cycles(data: dict):
         qty = c.get("quantity", 1) or 1
         mult = c.get("multiplier", 100) or 100
         price = prices.get(ul)
+        currency = currency_for_symbol(ul, int(mult))
 
         if price is not None:
-            currency = currency_for_symbol(ul)
             unrealized = (price - put_strike) * qty * mult
             c["stock_pnl"] = convert_to_usd(unrealized, currency)
             c["current_price"] = price
 
-        c["option_pnl"] = (c.get("put_premium") or 0) + (c.get("call_premium") or 0)
-        c["total_pnl"] = (c.get("stock_pnl") or 0) + (c.get("option_pnl") or 0)
+        put_prem = c.get("put_premium") or 0
+        call_prem = c.get("call_premium") or 0
+        c["option_pnl"] = convert_to_usd(put_prem, currency) + convert_to_usd(call_prem, currency)
+        c["total_pnl"] = (c.get("stock_pnl") or 0) + c.get("option_pnl", 0)
+
+    # Convert completed cycle P&L too
+    for c in cycles:
+        if c.get("cycle_status") == "completed":
+            ul = c.get("underlying", "")
+            mult = c.get("multiplier", 100) or 100
+            currency = currency_for_symbol(ul, int(mult))
+            c["option_pnl"] = convert_to_usd(c.get("option_pnl") or 0, currency)
+            c["stock_pnl"] = convert_to_usd(c.get("stock_pnl") or 0, currency) if c.get("stock_pnl") is not None else None
+            c["total_pnl"] = (c.get("stock_pnl") or 0) + c.get("option_pnl", 0)
 
     # Recalculate overview
     completed = [c for c in cycles if c.get("cycle_status") == "completed"]
@@ -430,6 +643,36 @@ def apply_formatting(service: Any, sid: str, sheet_id: int, columns: list, num_r
 
 
 # ── Dashboard Tab (matches web UI cards) ────────────────────────
+
+def compute_underlying_from_cycles(data: dict) -> list[dict]:
+    """Aggregate wheel cycle P&L by underlying (matches web UI wheel cycle view)."""
+    cycles = data.get("wheel_cycles", [])
+    if not cycles:
+        return []
+
+    grouped = {}
+    for c in cycles:
+        ul = c.get("underlying", "Unknown")
+        if ul not in grouped:
+            grouped[ul] = {"cycles": 0, "winning": 0, "total_pnl": 0.0}
+        grouped[ul]["cycles"] += 1
+        pnl = c.get("total_pnl") or 0
+        grouped[ul]["total_pnl"] += pnl
+        if pnl > 0:
+            grouped[ul]["winning"] += 1
+
+    result = []
+    for ul, stats in grouped.items():
+        n = stats["cycles"]
+        result.append({
+            "underlying": ul,
+            "trade_count": n,
+            "win_rate": stats["winning"] / n if n > 0 else 0,
+            "total_pnl": stats["total_pnl"],
+            "avg_pnl": stats["total_pnl"] / n if n > 0 else 0,
+        })
+    return sorted(result, key=lambda x: x["underlying"])
+
 
 def compute_account_breakdown(data: dict) -> list[dict]:
     """Aggregate stats by account from round_trips and wheel_cycles."""
@@ -692,15 +935,17 @@ def create_dashboard_tab(service: Any, sid: str, data: dict):
 
 def export_trades(service: Any, sid: str, data: dict):
     """Export trades data matching web UI layout."""
+    convert_trades_to_usd(data)
     enrich_wheel_cycles(data)
     create_dashboard_tab(service, sid, data)
 
+    underlying_data = compute_underlying_from_cycles(data) or data.get("underlying_breakdown")
     tabs = [
         ("Trades", data.get("round_trips"), TRADES_COLS, True),
         ("Wheel Cycles", data.get("wheel_cycles"), WHEEL_COLS, True),
         ("Strategy", data.get("strategy_performance"), STRATEGY_COLS, True),
         ("Monthly", data.get("monthly_breakdown"), MONTHLY_COLS, True),
-        ("Underlying", data.get("underlying_breakdown"), UNDERLYING_COLS, True),
+        ("Underlying", underlying_data, UNDERLYING_COLS, True),
     ]
 
     for name, tab_data, cols, totals in tabs:

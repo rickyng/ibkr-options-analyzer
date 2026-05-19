@@ -31,12 +31,33 @@ CONTRACT_MULTIPLIER = {"US": 100, "HK": 100, "JP": 1}
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 
-def _fetch_price_yahoo(symbol: str) -> float | None:
+def _map_symbol_to_yahoo(symbol: str, market: str | None = None) -> str:
+    """Map IBKR underlying symbol to Yahoo Finance format.
+
+    - JP numeric symbols need .T suffix (e.g., 1321 → 1321.T)
+    - HK numeric symbols need .HK suffix (e.g., 1299 → 1299.HK)
+    - US symbols are used as-is
+    """
+    if not symbol:
+        return symbol
+    if symbol.endswith(".T") or symbol.endswith(".HK"):
+        return symbol
+    core = symbol.replace(".HK", "").replace(".T", "")
+    if core.isdigit():
+        if market == "JP":
+            return symbol + ".T"
+        if market == "HK":
+            return symbol + ".HK"
+    return symbol
+
+
+def _fetch_price_yahoo(symbol: str, market: str | None = None) -> float | None:
     """Fetch current price from Yahoo Finance (synchronous)."""
+    yahoo_symbol = _map_symbol_to_yahoo(symbol, market)
     try:
         with httpx.Client(timeout=5) as client:
             resp = client.get(
-                YAHOO_CHART_URL.format(symbol=symbol),
+                YAHOO_CHART_URL.format(symbol=yahoo_symbol),
                 params={"range": "1d", "interval": "1d"},
                 headers={"User-Agent": "Mozilla/5.0"},
             )
@@ -45,24 +66,65 @@ def _fetch_price_yahoo(symbol: str) -> float | None:
                 return meta.get("regularMarketPrice")
     except Exception:
         pass
+    # Fallback: if numeric and market not JP, try the other suffix
+    core = symbol.replace(".HK", "").replace(".T", "")
+    if core.isdigit() and market != "JP":
+        fallback = symbol + ".T"
+        try:
+            with httpx.Client(timeout=5) as client:
+                resp = client.get(
+                    YAHOO_CHART_URL.format(symbol=fallback),
+                    params={"range": "1d", "interval": "1d"},
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                if resp.status_code == 200:
+                    meta = resp.json()["chart"]["result"][0]["meta"]
+                    return meta.get("regularMarketPrice")
+        except Exception:
+            pass
     return None
 
 
-def _derive_currency_from_symbol(underlying: str) -> str:
+def _derive_currency_from_symbol(underlying: str, multiplier: int | None = None) -> str:
     """Derive currency from underlying symbol format.
 
-    - JP (.T suffix): JPY
-    - HK (all digits): HKD
+    - JP (.T suffix or multiplier=1 with numeric symbol): JPY
+    - HK (all digits, multiplier=100): HKD
     - US (alphabetic): USD
+
+    JP stocks in IBKR have numeric underlyings without .T suffix (e.g., "1321").
+    The multiplier field (1 for JP, 100 for US/HK) is the reliable classifier.
     """
     if not underlying:
         return "USD"
     if underlying.endswith(".T"):
         return "JPY"
     symbol_core = underlying.replace(".HK", "").replace(".T", "")
+    # Numeric symbols: JP if multiplier=1, HK if multiplier=100
     if symbol_core.isdigit():
+        if multiplier is not None and multiplier == 1:
+            return "JPY"
         return "HKD"
     return "USD"
+
+
+def _derive_market_from_symbol(underlying: str, multiplier: int | None = None) -> str:
+    """Derive market from underlying symbol format.
+
+    - JP: symbols ending with .T, or numeric with multiplier=1
+    - HK: numeric symbols (all digits) with multiplier=100
+    - US: alphabetic symbols
+    """
+    if not underlying:
+        return "US"
+    if underlying.endswith(".T"):
+        return "JP"
+    symbol_core = underlying.replace(".HK", "").replace(".T", "")
+    if symbol_core.isdigit():
+        if multiplier is not None and multiplier == 1:
+            return "JP"
+        return "HK"
+    return "US"
 
 
 def _convert_to_usd(amount: float, currency: str) -> float:
@@ -143,24 +205,6 @@ def _parse_expiry(expiry_str: str) -> date | None:
         except ValueError:
             continue
     return None
-
-
-def _derive_market_from_symbol(underlying: str) -> str:
-    """Derive market from underlying symbol format.
-
-    - JP: symbols ending with .T (e.g., 1321.T, 7203.T)
-    - HK: numeric symbols (all digits, e.g., 00733, 388, 700)
-    - US: alphabetic symbols (e.g., AAPL, SPY, TSLA)
-    """
-    if not underlying:
-        return "US"
-    if underlying.endswith(".T"):
-        return "JP"
-    # HK symbols are numeric (may have leading zeros, may also have .HK suffix)
-    symbol_core = underlying.replace(".HK", "").replace(".T", "")
-    if symbol_core.isdigit():
-        return "HK"
-    return "US"
 
 
 def _rt_pnl(rt: dict) -> float:
@@ -295,8 +339,9 @@ def _flatten_calendar(calendar: dict) -> list:
     for expiry, items in calendar.items():
         for pos in items:
             underlying = pos.get("underlying", "")
-            currency = _derive_currency_from_symbol(underlying)
-            market = _derive_market_from_symbol(underlying)
+            mult = pos.get("multiplier", 100)
+            currency = pos.get("currency") or _derive_currency_from_symbol(underlying, mult)
+            market = pos.get("market") or _derive_market_from_symbol(underlying, mult)
             positions.append({
                 "underlying": underlying,
                 "expiry": expiry,
@@ -310,7 +355,7 @@ def _flatten_calendar(calendar: dict) -> list:
                 "account_name": pos.get("account", ""),
                 "currency": currency,
                 "market": market,
-                "multiplier": pos.get("multiplier", 100),
+                "multiplier": mult,
             })
     return positions
 
@@ -481,12 +526,15 @@ def register_callbacks(app: Dash) -> None:
             return data
 
         round_trips = data.get("round_trips", [])
+        wheel_cycles = data.get("wheel_cycles", [])
         account = None if active_account == "all" else active_account
 
         if account:
             round_trips = [rt for rt in round_trips if rt.get("account") == account]
+            wheel_cycles = [wc for wc in wheel_cycles if wc.get("account") == account]
         if market and market != "All Markets":
             round_trips = [rt for rt in round_trips if _derive_market_from_symbol(rt.get("underlying", "")) == market]
+            wheel_cycles = [wc for wc in wheel_cycles if _derive_market_from_symbol(wc.get("underlying", ""), wc.get("multiplier")) == market]
         if risk and risk != "All Risks":
             # Round-trips don't have risk_category; pass all through
             pass
@@ -544,19 +592,25 @@ def register_callbacks(app: Dash) -> None:
                 "total_pnl": sum(_rt_pnl(t) for t in _mt),
             })
 
-        # Get wheel cycle P&L for Stock P&L card
-        wheel_overview = data.get("wheel_overview", {})
-        if wheel_overview:
-            total_stock_pnl = wheel_overview.get("total_stock_pnl", 0)
-            total_option_pnl = wheel_overview.get("total_option_pnl", 0)
-        else:
-            total_stock_pnl = sum(rt.get("assigned_stock_pnl", 0) for rt in round_trips)
-            total_option_pnl = sum(rt.get("realized_pnl", 0) for rt in round_trips)
-        total_wheel_pnl = total_option_pnl + total_stock_pnl
+        # Recompute wheel overview from filtered wheel cycles
+        filtered_wheel_overview = {
+            "total_option_pnl": sum(wc.get("option_pnl", 0) for wc in wheel_cycles),
+            "total_stock_pnl": sum(wc.get("stock_pnl", 0) or 0 for wc in wheel_cycles),
+            "total_wheel_pnl": sum(wc.get("total_pnl", 0) for wc in wheel_cycles),
+            "completed_cycles": sum(1 for wc in wheel_cycles if wc.get("cycle_status") == "completed"),
+            "stock_held_cycles": sum(1 for wc in wheel_cycles if wc.get("cycle_status") == "stock_held"),
+            "incomplete_cycles": sum(1 for wc in wheel_cycles if wc.get("cycle_status") == "incomplete"),
+        }
+
+        total_stock_pnl = filtered_wheel_overview["total_stock_pnl"]
+        total_option_pnl = filtered_wheel_overview["total_option_pnl"]
+        total_wheel_pnl = filtered_wheel_overview["total_wheel_pnl"]
 
         return {
             **data,
             "round_trips": round_trips,
+            "wheel_cycles": wheel_cycles,
+            "wheel_overview": filtered_wheel_overview,
             "monthly_breakdown": monthly,
             "overview": {
                 "total_trades": total,
@@ -1577,7 +1631,9 @@ def register_callbacks(app: Dash) -> None:
             # Fetch missing prices from Yahoo Finance
             missing = [s for s in underlyings if s not in prices]
             for symbol in missing:
-                price = _fetch_price_yahoo(symbol)
+                # Derive market from symbol format for Yahoo mapping
+                sym_market = _derive_market_from_symbol(symbol)
+                price = _fetch_price_yahoo(symbol, sym_market)
                 if price is not None:
                     prices[symbol] = price
 
@@ -1589,7 +1645,7 @@ def register_callbacks(app: Dash) -> None:
                 open_price = rt.get("open_price", 0)
                 commission = rt.get("commission", 0)
                 multiplier = rt.get("_multiplier", 100)
-                currency = _derive_currency_from_symbol(underlying)
+                currency = _derive_currency_from_symbol(underlying, int(multiplier))
 
                 # Option P&L is always just the premium received (regardless of current price)
                 option_pnl = qty * multiplier * open_price - commission
@@ -1622,11 +1678,16 @@ def register_callbacks(app: Dash) -> None:
         # Enrich wheel_cycles with unrealized stock P&L for incomplete/stock_held
         wheel_cycles = data.get("wheel_cycles", [])
         if wheel_cycles:
-            # Collect underlyings that need prices
+            # Collect underlyings with their market info (from cycle multiplier)
             wc_underlyings = set()
+            wc_market_by_symbol = {}
             for wc in wheel_cycles:
                 if wc.get("cycle_status") in ("incomplete", "stock_held"):
-                    wc_underlyings.add(wc.get("underlying", ""))
+                    ul = wc.get("underlying", "")
+                    wc_underlyings.add(ul)
+                    if ul not in wc_market_by_symbol:
+                        mult = wc.get("multiplier", 100)
+                        wc_market_by_symbol[ul] = _derive_market_from_symbol(ul, mult)
 
             if wc_underlyings:
                 # Reuse prices dict from assigned trades, or fetch fresh
@@ -1647,7 +1708,8 @@ def register_callbacks(app: Dash) -> None:
 
                 still_missing = [s for s in missing_wc if s not in wc_prices]
                 for symbol in still_missing:
-                    price = _fetch_price_yahoo(symbol)
+                    sym_market = wc_market_by_symbol.get(symbol, _derive_market_from_symbol(symbol))
+                    price = _fetch_price_yahoo(symbol, sym_market)
                     if price is not None:
                         wc_prices[symbol] = price
 
@@ -1659,18 +1721,35 @@ def register_callbacks(app: Dash) -> None:
                         qty = wc.get("quantity", 1)
                         mult = wc.get("multiplier", 100)
                         current_price = wc_prices.get(underlying)
+                        currency = _derive_currency_from_symbol(underlying, mult)
+
+                        # Convert option_pnl to USD
+                        put_premium = wc.get("put_premium", 0) or 0
+                        call_premium = wc.get("call_premium", 0) or 0
+                        wc["option_pnl"] = _convert_to_usd(put_premium, currency) + _convert_to_usd(call_premium, currency)
 
                         if current_price is not None:
-                            currency = _derive_currency_from_symbol(underlying)
                             unrealized = (current_price - put_strike) * qty * mult
                             wc["stock_pnl"] = _convert_to_usd(unrealized, currency)
                             wc["current_price"] = current_price
+                            wc["current_price_usd"] = _convert_to_usd(current_price, currency)
                         else:
                             wc["current_price"] = None
+                            wc["current_price_usd"] = None
 
-                        # Recalculate totals
-                        wc["option_pnl"] = wc.get("put_premium", 0) + wc.get("call_premium", 0)
-                        wc["total_pnl"] = wc.get("stock_pnl", 0) + wc.get("option_pnl", 0)
+                        # Recalculate total_pnl (now both in USD)
+                        wc["total_pnl"] = (wc.get("stock_pnl") or 0) + wc.get("option_pnl", 0)
+
+                # Convert completed cycle P&L to USD
+                for wc in wheel_cycles:
+                    if wc.get("cycle_status") == "completed":
+                        underlying = wc.get("underlying", "")
+                        mult = wc.get("multiplier", 100)
+                        currency = _derive_currency_from_symbol(underlying, mult)
+                        wc["option_pnl"] = _convert_to_usd(wc.get("option_pnl", 0) or 0, currency)
+                        if wc.get("stock_pnl") is not None:
+                            wc["stock_pnl"] = _convert_to_usd(wc.get("stock_pnl", 0), currency)
+                        wc["total_pnl"] = (wc.get("stock_pnl") or 0) + wc.get("option_pnl", 0)
 
             # Always recalculate wheel_overview from enriched cycles
             completed_cycles = [wc for wc in wheel_cycles if wc.get("cycle_status") == "completed"]
@@ -1690,7 +1769,8 @@ def register_callbacks(app: Dash) -> None:
         for rt in trips:
             if rt.get("close_reason") != "assigned":
                 underlying = rt.get("underlying", "")
-                currency = _derive_currency_from_symbol(underlying)
+                rt_mult = rt.get("_multiplier", 100)
+                currency = _derive_currency_from_symbol(underlying, int(rt_mult))
                 for key in ("realized_pnl", "net_premium"):
                     if key in rt:
                         rt[key] = _convert_to_usd(rt[key], currency)
@@ -2171,7 +2251,7 @@ def register_callbacks(app: Dash) -> None:
                     html.Td(f"{call_strike:,.0f}" if call_strike else "—", style={"backgroundColor": bg}),
                     html.Td(f"{qty}x{mult}", style={"backgroundColor": bg}),
                     html.Td(c.get("put_assigned_date", ""), style={"backgroundColor": bg}),
-                    html.Td(f"${c.get('current_price', 0):,.2f}" if c.get("current_price") else "—", style={"backgroundColor": bg}),
+                    html.Td(f"${c.get('current_price_usd', 0):,.2f}" if c.get("current_price_usd") is not None else (f"${c.get('current_price', 0):,.2f}" if c.get("current_price") else "—"), style={"backgroundColor": bg}),
                     html.Td(f"${opnl:,.0f}", style={"backgroundColor": bg}),
                     html.Td(f"${spnl:,.0f}", style={"backgroundColor": bg, "color": RISK_COLORS["SAFE"] if spnl >= 0 else RISK_COLORS["CRITICAL"]}),
                     html.Td(f"${tpnl:,.0f}", style={"backgroundColor": bg, "color": RISK_COLORS["SAFE"] if tpnl >= 0 else RISK_COLORS["CRITICAL"], "fontWeight": "bold"}),

@@ -19,12 +19,24 @@ static const std::map<std::string, std::string> SYMBOL_MAPPING = {
     {"BRK.A", "BRK-A"}
 };
 
-// Hong Kong stocks on IBKR are numeric-only (e.g., 1299, 388, 700)
-// Yahoo Finance uses .HK suffix
+// Both HK and JP stocks on IBKR are numeric-only.
+// HK: 1299, 388, 700 → need .HK suffix for Yahoo
+// JP: 7203, 1321, 6758 → need .T suffix for Yahoo
+// Default to .HK; callers can pass .T-suffixed symbols directly.
 static std::string map_symbol_to_yahoo(const std::string& symbol) {
     // Skip obvious header rows
     if (symbol == "UnderlyingSymbol" || symbol == "Symbol" || symbol.empty()) {
         return "";  // Invalid - will be filtered out
+    }
+
+    // Already has suffix - use as-is
+    if (symbol.size() > 2) {
+        std::string suffix = symbol.substr(symbol.size() - 2);
+        if (suffix == ".T") return symbol;
+    }
+    if (symbol.size() > 3) {
+        std::string suffix = symbol.substr(symbol.size() - 3);
+        if (suffix == ".HK") return symbol;
     }
 
     // Check explicit mapping first
@@ -33,8 +45,7 @@ static std::string map_symbol_to_yahoo(const std::string& symbol) {
         return it->second;
     }
 
-    // Hong Kong stocks: numeric-only symbols need .HK suffix
-    // (IBKR HK tickers are plain numbers like 1299, 388, 700)
+    // Numeric-only symbols: default to .HK suffix
     bool is_numeric = !symbol.empty();
     for (char c : symbol) {
         if (!std::isdigit(c)) {

@@ -3,6 +3,7 @@
 #include "utils/currency.hpp"
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <map>
 
 namespace ibkr::services {
@@ -37,6 +38,17 @@ int WheelCycleService::derive_multiplier(const std::string& underlying) {
 
     // US stocks have multiplier of 100
     return 100;
+}
+
+int WheelCycleService::derive_multiplier_from_data(const db::Database::RoundTrip& rt) {
+    double qty = std::abs(rt.quantity);
+    double open_price = std::abs(rt.open_price);
+    double net_premium = std::abs(rt.net_premium);
+    if (qty > 0 && open_price > 0) {
+        int derived = static_cast<int>(std::round(net_premium / (qty * open_price)));
+        if (derived > 0) return derived;
+    }
+    return derive_multiplier(rt.underlying);
 }
 
 Result<int> WheelCycleService::build_wheel_cycles(int64_t account_id) {
@@ -122,7 +134,7 @@ Result<int> WheelCycleService::build_wheel_cycles(int64_t account_id) {
             cycle.put_round_trip_id = put.id;
             cycle.put_strike = put.strike;
             cycle.quantity = put.quantity;
-            cycle.multiplier = derive_multiplier(put.underlying);
+            cycle.multiplier = derive_multiplier_from_data(put);
             cycle.put_premium = put.net_premium;
             cycle.put_assigned_date = put.close_date;
 

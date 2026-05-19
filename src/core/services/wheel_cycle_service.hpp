@@ -84,6 +84,12 @@ private:
      */
     static int derive_multiplier(const std::string& underlying);
 
+    /**
+     * Derive multiplier from actual trade data (net_premium / qty * open_price).
+     * Falls back to derive_multiplier() if data is insufficient.
+     */
+    static int derive_multiplier_from_data(const db::Database::RoundTrip& rt);
+
     db::Database& database_;
 };
 
