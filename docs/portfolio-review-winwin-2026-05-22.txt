@@ -1,0 +1,117 @@
+WinWin Portfolio Review — 2026-05-22
+
+═══════════════════════════════════════
+
+TOTAL PORTFOLIO: $739K USD
+UNREALIZED P&L: +$205,380 (+38.5%)
+
+═══════════════════════════════════════
+
+CURRENT ALLOCATION
+
+Quality (47%) — $344K
+  GOOG   400 shares   $383.40   $153,365   avg $174.01   +$83,760   +120%
+  MSFT   325 shares   $420.74   $136,561   avg $399.39   +$6,810    +5%
+  BRK B  100 shares   $480.33   $48,033    avg $478.34   +$199      +0.4%
+  AAPL   20 shares    $306.00   $6,121     avg $108.05   +$3,960    +182%
+
+Tech Growth (45%) — $335K
+  NVDA   500 shares   $220.44   $110,185   avg $108.78   +$55,810   +103%
+  TSM    200 shares   $409.10   $81,766    avg $110.83   +$59,620   +268%
+  META   100 shares   $608.28   $60,800    avg $578.31   +$2,970    +5%
+  AMZN   100 shares   $269.09   $26,913    avg $199.55   +$6,960    +35%
+  PLTR   400 shares   $137.91   $55,168    avg $138.38   -$191      -0.3%
+
+India ETF (3%) — $23K
+  RIGD   400 shares   $56.90    $22,760    avg $50.03    +$2,750    +14%
+
+ARK Winners (2%) — $16K
+  ARKW   100 shares   $145.88   $14,588    avg $118.01   +$2,790    +24%
+  ARKX   50 shares    $34.83    $1,741     avg $20.51    +$716      +71%
+
+Distressed (3%) — $20K
+  ARKK   200 shares   $76.98    $15,396    avg $118.86   -$8,380    -35%
+  ARKG   150 shares   $30.67    $4,600     avg $87.22    -$8,480    -65%
+
+HK Equities (0.1%) — $692
+  1137   5,000 shares HKD 1.08  HKD 5,400  avg HKD 8.42  -$4,705    -87%
+
+═══════════════════════════════════════
+
+P&L SUMMARY
+
+  US Quality:         $249K → $344K   +$94,729   +38%
+  US Tech Growth:     $181K → $335K   +$154,169  +85%
+  India ETF:          $20K  → $23K    +$2,750    +14%
+  ARK Winners:        $13K  → $16K    +$3,506    +27%
+  US Distressed:      $37K  → $20K    -$16,860   -46%
+  HK Equities:        $5K   → $0.7K   -$4,705    -87%
+
+  BIG WINNERS: GOOG +$84K | TSM +$60K | NVDA +$56K | AMZN +$7K
+  LOSERS:      ARKG -$8.5K | ARKK -$8.4K | 1137 HK -$4.7K
+
+═══════════════════════════════════════
+
+KEY STRENGTHS
+  - Largest position = GOOG 21% (healthy, no single-stock risk)
+  - Quality + Tech Growth = 92% of portfolio (strong compounders)
+  - Best-performing account across all 4 accounts (+38.5%)
+  - No extreme concentration (top 4 = 66%)
+
+KEY RISKS
+  - No income layer (0% in TLT/O/dividends)
+  - ARKK + ARKG = -$17K legacy drag
+  - 1137 HK at HKD 1.08 = near-zero value
+
+═══════════════════════════════════════
+
+COVERED CALLS — CORE PORTFOLIO
+
+  GOOG   4 contracts   $400 strike   30d   ~$2.0-2.8K/mo
+  MSFT   3 contracts   $440 strike   30d   ~$1.5-2.1K/mo
+  NVDA   5 contracts   $240 strike   30d   ~$2.5-4.0K/mo
+  TSM    2 contracts   $420 strike   30d   ~$1.0-1.5K/mo
+  META   1 contract    $630 strike   30d   ~$0.5-0.8K/mo
+  AMZN   1 contract    $280 strike   30d   ~$0.4-0.6K/mo
+  PLTR   4 contracts   $145 strike   30d   ~$0.8-1.2K/mo
+
+  TOTAL: ~$8.7-13K/month = $104-156K/year (14-21% yield)
+
+DISTRESSED EXIT — COVERED CALLS
+  ARKK   2 contracts   $80 strike    30d   ~$160-260/mo
+  ARKG   1 contract    $32 strike    30d   ~$75-135/mo
+
+  TOTAL: ~$235-395/month = $2.8-4.7K/year
+
+COMBINED OPTIONS YIELD: $107-161K/year (14.5-21.7%)
+
+═══════════════════════════════════════
+
+EXECUTION PLAN
+
+WEEK 1
+  [ ] Sell 1137 HK stock → ~$700 freed, -$4.7K tax loss harvested
+  [ ] Start OTM covered calls: ARKK ($80), ARKG ($32)
+  [ ] Start core covered calls: GOOG ($400), MSFT ($440), NVDA ($240), TSM ($420)
+
+WEEK 2-3
+  [ ] Add income layer: TLT ~$40K, O (Realty Income) ~$34K
+  [ ] Roll covered calls monthly
+
+ONGOING (MONTHLY)
+  [ ] Roll core covered calls → target $8.7-13K/month
+  [ ] Roll distressed covered calls → target $235-395/month
+  [ ] Rebalance if any position exceeds 25%
+  [ ] Quarterly portfolio review
+
+═══════════════════════════════════════
+
+COMPARISON — ALL ACCOUNTS
+
+  Account    Total     Positions  Largest   Risk        Return
+  No1        $4.75M    26         NVDA 37%  Extreme     +32%
+  No2        $924K     26         GOOG 17%  Moderate    +14%
+  No3        $159K     6          TSLA 26%  Low         +2.6%
+  WinWin     $739K     16         GOOG 21%  Moderate    +38.5%
+
+  WinWin = best return, balanced allocation, only minor adjustments needed.

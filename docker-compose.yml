@@ -1,0 +1,14 @@
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ibkr-dashboard
+    ports:
+      - "8001:8001"
+    volumes:
+      - ~/.ibkr-options-analyzer:/home/appuser/.ibkr-options-analyzer
+    restart: unless-stopped
+    environment:
+      - IBKR_DB_PATH=/home/appuser/.ibkr-options-analyzer/data.db
+      - IBKR_CLI_PATH=/app/ibkr-options-analyzer

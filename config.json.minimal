@@ -1,0 +1,16 @@
+{
+  "database": {
+    "path": "~/.ibkr-options-analyzer/data.db"
+  },
+  "logging": {
+    "level": "info",
+    "file": "~/.ibkr-options-analyzer/logs/app.log"
+  },
+  "screener": {
+    "watchlist": ["AAPL", "MSFT"],
+    "allow_synthetic_options": true
+  },
+  "alpha_vantage": {
+    "api_key": "YOUR_ALPHA_VANTAGE_API_KEY"
+  }
+}

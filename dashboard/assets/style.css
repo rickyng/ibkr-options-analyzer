@@ -1,0 +1,361 @@
+/* ============================================================
+   IBKR Options Portfolio — Design Tokens & Global Styles
+   ============================================================ */
+
+/* --- Design Tokens --- */
+:root {
+  /* Background layers */
+  --bg-page: #0f172a;
+  --bg-card: #1e293b;
+  --bg-card-hover: #253449;
+  --bg-header: #0d1321;
+  --bg-input: #0f172a;
+
+  /* Text layers */
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  /* Borders */
+  --border-subtle: #334155;
+  --border-accent: #475569;
+
+  /* Status colors */
+  --color-profit: #22c55e;
+  --color-loss: #ef4444;
+  --color-warning: #fbbf24;
+  --color-info: #3b82f6;
+
+  /* Risk colors */
+  --risk-safe: #22c55e;
+  --risk-moderate: #fbbf24;
+  --risk-high: #f97316;
+  --risk-critical: #f87171;
+
+  /* Shadows */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-kpi: 0 2px 8px rgba(0, 0, 0, 0.25);
+
+  /* Spacing */
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --spacing-xl: 2rem;
+
+  /* Typography */
+  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.85rem;
+  --font-size-base: 0.95rem;
+  --font-size-lg: 1.1rem;
+  --font-size-xl: 1.3rem;
+
+  /* Radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+/* --- Page Body --- */
+body {
+  font-family: var(--font-family);
+  background-color: var(--bg-page);
+  color: var(--text-primary);
+}
+
+/* ============================================================
+   Card Tiers
+   ============================================================ */
+
+/* Tier 1: KPI Metric Cards */
+.kpi-card {
+  background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-card-hover) 100%);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-kpi);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.kpi-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card-hover);
+}
+
+.kpi-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--spacing-xs);
+}
+
+.kpi-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-family: var(--font-family);
+}
+
+/* Tier 2: Content Cards */
+.content-card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+.content-card .card-header-title {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--spacing-md);
+  padding-bottom: var(--spacing-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* Tier 3: Detail Panel */
+.detail-panel {
+  background: linear-gradient(135deg, #1a2744 0%, var(--bg-card-hover) 100%);
+  border: 1px solid var(--border-accent);
+  border-left: 3px solid var(--color-info);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* ============================================================
+   Toolbar
+   ============================================================ */
+
+.toolbar-card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+.global-filter-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.global-filter-row .form-select {
+  width: auto;
+  min-width: 140px;
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+.global-filter-row .form-select:focus {
+  border-color: var(--color-info);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+}
+
+/* ============================================================
+   Tabs
+   ============================================================ */
+
+.nav-tabs {
+  border-bottom: 1px solid var(--border-subtle) !important;
+  margin-bottom: var(--spacing-md) !important;
+}
+
+.nav-tabs .nav-link {
+  color: var(--text-secondary) !important;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0 !important;
+  font-size: var(--font-size-sm);
+}
+
+.nav-tabs .nav-link.active {
+  color: var(--text-primary) !important;
+  background-color: var(--bg-card) !important;
+  border-color: var(--border-subtle) !important;
+  border-bottom-color: var(--bg-card) !important;
+  font-weight: 600;
+}
+
+.nav-tabs .nav-link:hover {
+  color: var(--text-primary) !important;
+  border-color: var(--border-accent) !important;
+}
+
+/* ============================================================
+   DataTable Global Overrides
+   ============================================================ */
+
+.dash-spreadsheet-container .dash-spreadsheet-inner th {
+  font-family: var(--font-family) !important;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.dash-spreadsheet-container .dash-spreadsheet-inner td {
+  font-family: var(--font-family) !important;
+  font-size: var(--font-size-sm);
+}
+
+.dash-spreadsheet-container .dash-spreadsheet-inner .dash-header {
+  background-color: var(--bg-card-hover) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border-subtle) !important;
+}
+
+.dash-spreadsheet-container .dash-spreadsheet-inner .dash-cell {
+  background-color: var(--bg-card) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  font-family: var(--font-family) !important;
+}
+
+.dash-spreadsheet-container .dash-spreadsheet-inner .dash-cell.row-odd {
+  background-color: var(--bg-card-hover) !important;
+}
+
+/* Pagination */
+.dash-spreadsheet-container .previous-next-container .page-number {
+  color: var(--text-secondary) !important;
+  font-family: var(--font-family) !important;
+}
+
+/* ============================================================
+   Sub-Tab Fade Animation
+   ============================================================ */
+
+.subtab-content {
+  animation: fadeIn 0.2s ease-in;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ============================================================
+   Loading Spinner
+   ============================================================ */
+
+.dash-spinner {
+  color: var(--color-info) !important;
+}
+
+.dash-loading {
+  background-color: transparent !important;
+  min-height: 80px !important;
+}
+
+/* ============================================================
+   Toast
+   ============================================================ */
+
+.action-toast {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  width: 350px;
+  z-index: 9999;
+}
+
+/* ============================================================
+   Section Spacing
+   ============================================================ */
+
+.section-gap {
+  margin-bottom: var(--spacing-lg);
+}
+
+.section-gap-lg {
+  margin-bottom: var(--spacing-xl);
+}
+
+/* ============================================================
+   Risk Gauge
+   ============================================================ */
+
+.risk-gauge-zones {
+  display: flex;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  position: relative;
+  height: 28px;
+}
+
+.risk-gauge-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  border-right: 1px solid var(--border-subtle);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.risk-gauge-marker {
+  position: absolute;
+  top: -4px;
+  width: 2px;
+  height: 36px;
+  background-color: var(--text-primary);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.5);
+  transition: left 0.3s ease;
+  z-index: 2;
+}
+
+/* ============================================================
+   Compact Header
+   ============================================================ */
+
+.dashboard-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-md);
+  padding: var(--spacing-sm) 0;
+}
+
+.dashboard-header h1 {
+  font-size: var(--font-size-xl);
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.dashboard-header .header-subtitle {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   Form Inputs (Dark Theme)
+   ============================================================ */
+
+.form-control,
+.form-select {
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+.form-control:focus,
+.form-select:focus {
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  border-color: var(--color-info);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+}
+
+.form-control::placeholder {
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   Misc
+   ============================================================ */
+
+/* P&L positive/negative inline colors */
+.pnl-positive { color: var(--color-profit); }
+.pnl-negative { color: var(--color-loss); }

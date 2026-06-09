@@ -1,0 +1,544 @@
+#include "analyze_command.hpp"
+#include "services/position_service.hpp"
+#include "services/price_service.hpp"
+#include "services/portfolio_service.hpp"
+#include "db/database.hpp"
+#include "analysis/risk_calculator.hpp"
+#include "utils/logger.hpp"
+#include "utils/json_output.hpp"
+#include <date/date.h>
+#include <chrono>
+#include <iostream>
+#include <iomanip>
+#include <map>
+#include <set>
+#include <algorithm>
+#include <cmath>
+
+namespace ibkr::commands {
+
+using utils::Result;
+using utils::Error;
+using utils::Logger;
+using analysis::RiskCalculator;
+using analysis::Strategy;
+using analysis::Position;
+using analysis::RiskMetrics;
+
+Result<void> AnalyzeCommand::execute(
+    const config::Config& config,
+    const std::string& analysis_type,
+    const std::string& account_filter,
+    const std::string& underlying_filter,
+    const utils::OutputOptions& output_opts) {
+
+    Logger::info("Starting analyze command: type={}", analysis_type);
+
+    if (analysis_type == "open") {
+        return analyze_open(config, account_filter, underlying_filter, output_opts);
+    } else if (analysis_type == "impact") {
+        if (underlying_filter.empty()) {
+            return Error{"Impact analysis requires --underlying option"};
+        }
+        return analyze_impact(config, underlying_filter, account_filter, output_opts);
+    } else if (analysis_type == "portfolio") {
+        return analyze_portfolio(config, account_filter, underlying_filter, output_opts);
+    } else {
+        return Error{"Invalid analysis type", "Must be one of: open, impact, portfolio"};
+    }
+}
+
+Result<void> AnalyzeCommand::analyze_open(
+    const config::Config& config,
+    const std::string& account_filter,
+    const std::string& underlying_filter,
+    const utils::OutputOptions& output_opts) {
+
+    Logger::info("Analyzing open positions");
+
+    db::Database database(config.database.path);
+    auto init_result = database.initialize();
+    if (!init_result) {
+        return Error{"Failed to initialize database", init_result.error().message};
+    }
+
+    services::PositionService position_service(database);
+    auto positions_result = position_service.load_positions(account_filter, underlying_filter);
+    if (!positions_result) {
+        return Error{"Failed to load positions", positions_result.error().message};
+    }
+
+    auto positions = *positions_result;
+
+    if (positions.empty()) {
+        if (output_opts.json) {
+            std::cout << utils::JsonOutput::open_positions({}, {}, {}) << "\n";
+        } else {
+            std::cout << "No open positions found.\n";
+        }
+        return Result<void>{};
+    }
+
+    // Fetch prices via service
+    services::PriceService price_service(database);
+    std::vector<std::string> underlyings;
+    for (const auto& pos : positions) underlyings.push_back(pos.underlying);
+    auto current_prices = price_service.fetch_for_positions(underlyings);
+
+    // Load account names via service
+    auto account_names_result = position_service.load_account_names();
+    std::map<int64_t, std::string> account_names = account_names_result
+        ? *account_names_result : std::map<int64_t, std::string>{};
+
+    // JSON output short-circuit
+    if (output_opts.json) {
+        std::cout << utils::JsonOutput::open_positions(positions, current_prices, account_names) << "\n";
+        return Result<void>{};
+    }
+    if (output_opts.quiet) return Result<void>{};
+
+    // --- Human-readable output ---
+
+    // Calendar week bucket grouping
+    const std::vector<std::string> week_labels = {
+        "This Week", "Next Week", "Week 3", "Week 4", "Week 5+"
+    };
+
+    struct PosEntry { Position pos; int days; std::string account_name; int week_offset; };
+    std::vector<std::vector<PosEntry>> bucket_entries(week_labels.size());
+
+    for (const auto& pos : positions) {
+        int days = RiskCalculator::calculate_days_to_expiry(pos.expiry);
+        std::string acct = "Unknown";
+        auto it = account_names.find(pos.account_id);
+        if (it != account_names.end()) acct = it->second;
+
+        // Compute calendar week offset
+        int woff = -1;
+        if (days >= 0) {
+            using namespace date;
+            std::istringstream ss(pos.expiry);
+            year_month_day ymd;
+            ss >> parse("%F", ymd);
+            if (!ss.fail() && ymd.ok()) {
+                auto today = floor<std::chrono::days>(std::chrono::system_clock::now());
+                auto expiry_day = sys_days{ymd};
+                auto today_monday = sys_days{today} - (weekday{today} - Monday);
+                auto expiry_monday = expiry_day - (weekday{expiry_day} - Monday);
+                woff = static_cast<int>((expiry_monday - today_monday).count() / 7);
+            }
+        }
+
+        size_t b = 4; // default: Week 5+
+        if (woff <= 0) b = 0;
+        else if (woff == 1) b = 1;
+        else if (woff == 2) b = 2;
+        else if (woff == 3) b = 3;
+
+        bucket_entries[b].push_back({pos, days, acct, woff});
+    }
+
+    // Display by calendar week bucket
+    for (size_t b = 0; b < week_labels.size(); ++b) {
+        const auto& entries = bucket_entries[b];
+        std::cout << "\n" << std::string(80, '=') << "\n";
+        std::cout << week_labels[b] << " — " << entries.size() << " position";
+        if (entries.size() != 1) std::cout << "s";
+        std::cout << "\n" << std::string(80, '-') << "\n";
+
+        if (entries.empty()) { std::cout << "  (none)\n"; continue; }
+
+        std::vector<PosEntry> sorted = entries;
+        std::sort(sorted.begin(), sorted.end(),
+            [](const PosEntry& a, const PosEntry& b) {
+                if (a.account_name != b.account_name) return a.account_name < b.account_name;
+                if (a.pos.underlying != b.pos.underlying) return a.pos.underlying < b.pos.underlying;
+                return a.pos.expiry < b.pos.expiry;
+            });
+
+        std::string cur_account;
+        for (const auto& e : sorted) {
+            if (e.account_name != cur_account) {
+                std::cout << "\n  [" << e.account_name << "]\n";
+                cur_account = e.account_name;
+            }
+            std::cout << "    " << e.pos.underlying << "  "
+                      << e.pos.expiry << "  $"
+                      << std::fixed << std::setprecision(2) << e.pos.strike
+                      << " " << e.pos.right << " × " << e.pos.quantity
+                      << " @ $" << e.pos.entry_premium;
+            if (e.pos.is_manual) std::cout << " [MANUAL]";
+            if (current_prices.count(e.pos.underlying)) {
+                std::cout << "  (now: $" << std::fixed << std::setprecision(2)
+                          << current_prices[e.pos.underlying].price << ")";
+            }
+            if (current_prices.count(e.pos.underlying) && e.pos.quantity < 0) {
+                double cp = current_prices[e.pos.underlying].price;
+                double dist = e.pos.right == 'P'
+                    ? ((cp - e.pos.strike) / cp) * 100.0
+                    : ((e.pos.strike - cp) / cp) * 100.0;
+                bool itm = (e.pos.right == 'P' && cp < e.pos.strike) ||
+                           (e.pos.right == 'C' && cp > e.pos.strike);
+                if (itm) std::cout << " ⚠️ ITM " << std::abs(dist) << "%";
+                else if (dist < 5.0) std::cout << " ⚡ " << dist << "% OTM";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // Portfolio summary via service
+    auto summary = services::PositionService::calculate_portfolio_summary(positions);
+
+    std::cout << "\n" << std::string(80, '=') << "\n";
+    std::cout << "CONSOLIDATED PORTFOLIO SUMMARY\n";
+    std::cout << std::string(80, '=') << "\n";
+
+    // Risk level categorization
+    struct PositionInfo { std::string label, expiry, account_name; double assignment_capital; };
+    struct RiskLevel { int count = 0; double assignment_capital = 0.0; std::vector<PositionInfo> positions; };
+    RiskLevel level1, level2, level3, level4;
+
+    for (const auto& pos : positions) {
+        std::string acct = "Unknown";
+        auto it = account_names.find(pos.account_id);
+        if (it != account_names.end()) acct = it->second;
+
+        if (pos.quantity >= 0) continue;
+
+        if (pos.right == 'P') {
+            double assignment_capital = pos.strike * pos.multiplier * std::abs(pos.quantity);
+            PositionInfo info{pos.underlying + " $" + std::to_string(static_cast<int>(pos.strike)) + "P",
+                              pos.expiry, acct, assignment_capital};
+            if (current_prices.count(pos.underlying)) {
+                double cp = current_prices[pos.underlying].price;
+                double dist_pct = ((cp - pos.strike) / cp) * 100.0;
+                if (cp <= pos.strike || dist_pct <= 1.0) { level1.count++; level1.assignment_capital += assignment_capital; level1.positions.push_back(info); }
+                else if (dist_pct <= 5.0) { level2.count++; level2.assignment_capital += assignment_capital; level2.positions.push_back(info); }
+                else if (dist_pct <= 10.0) { level3.count++; level3.assignment_capital += assignment_capital; level3.positions.push_back(info); }
+                else { level4.count++; level4.assignment_capital += assignment_capital; level4.positions.push_back(info); }
+            } else {
+                level4.count++; level4.assignment_capital += assignment_capital; level4.positions.push_back(info);
+            }
+        } else if (pos.right == 'C') {
+            PositionInfo info{pos.underlying + " $" + std::to_string(static_cast<int>(pos.strike)) + "C",
+                              pos.expiry, acct, 0.0};
+            if (current_prices.count(pos.underlying)) {
+                double cp = current_prices[pos.underlying].price;
+                double dist_pct = ((pos.strike - cp) / cp) * 100.0;
+                if (cp >= pos.strike || dist_pct <= 1.0) { level1.count++; level1.positions.push_back(info); }
+                else if (dist_pct <= 5.0) { level2.count++; level2.positions.push_back(info); }
+                else if (dist_pct <= 10.0) { level3.count++; level3.positions.push_back(info); }
+                else { level4.count++; level4.positions.push_back(info); }
+            }
+        }
+    }
+
+    std::cout << "\nPosition Breakdown:\n";
+    std::cout << "  Total Positions: " << summary.total_positions << "\n";
+    std::cout << "  Short Puts: " << summary.short_puts << "\n";
+    std::cout << "  Short Calls: " << summary.short_calls << "\n";
+    std::cout << "  Long Positions: " << summary.long_positions << "\n";
+
+    std::cout << "\nExpiration Schedule:\n";
+    std::cout << "  Expiring in 7 days: " << summary.expiring_7_days << " positions\n";
+    std::cout << "  Expiring in 30 days: " << summary.expiring_30_days << " positions\n";
+
+    std::cout << "\nRisk Summary:\n";
+    std::cout << "  Total Premium Collected: $" << std::fixed << std::setprecision(2)
+              << summary.total_premium_collected << "\n";
+    std::cout << "  Total Max Loss (short puts): $" << summary.total_max_loss << "\n";
+    if (summary.short_calls > 0)
+        std::cout << "  Short Calls Max Loss: UNLIMITED (" << summary.short_calls << " positions)\n";
+
+    // Risk levels display
+    std::cout << "\n" << std::string(80, '-') << "\nASSIGNMENT RISK LEVELS\n"
+              << std::string(80, '-') << "\n";
+
+    auto sort_by_acct = [](std::vector<PositionInfo>& v) {
+        std::sort(v.begin(), v.end(), [](const PositionInfo& a, const PositionInfo& b) {
+            return a.account_name != b.account_name ? a.account_name < b.account_name : a.expiry < b.expiry;
+        });
+    };
+    auto display = [](const std::vector<PositionInfo>& v) {
+        std::string cur;
+        for (const auto& p : v) {
+            if (p.account_name != cur) { if (!cur.empty()) std::cout << "\n"; std::cout << "  [" << p.account_name << "]:\n"; cur = p.account_name; }
+            std::cout << "    " << p.expiry << " - " << p.label;
+            if (p.assignment_capital > 0) std::cout << " ($" << std::fixed << std::setprecision(0) << p.assignment_capital << ")";
+            std::cout << "\n";
+        }
+    };
+
+    sort_by_acct(level1.positions); sort_by_acct(level2.positions);
+    sort_by_acct(level3.positions); sort_by_acct(level4.positions);
+
+    std::cout << "\nLevel 1 - CRITICAL (ITM or ≤1% OTM):\n  Positions: " << level1.count << "\n";
+    if (level1.count > 0) { std::cout << "  Capital if Assigned: $" << std::fixed << std::setprecision(2) << level1.assignment_capital << "\n"; display(level1.positions); }
+    std::cout << "\nLevel 2 - HIGH (1-5% OTM):\n  Positions: " << level2.count << "\n";
+    if (level2.count > 0) { std::cout << "  Capital if Assigned: $" << std::fixed << std::setprecision(2) << level2.assignment_capital << "\n"; display(level2.positions); }
+    std::cout << "\nLevel 3 - MODERATE (5-10% OTM):\n  Positions: " << level3.count << "\n";
+    if (level3.count > 0) { std::cout << "  Capital if Assigned: $" << std::fixed << std::setprecision(2) << level3.assignment_capital << "\n"; display(level3.positions); }
+    std::cout << "\nLevel 4 - SAFE (>10% OTM):\n  Positions: " << level4.count << "\n";
+    if (level4.count > 0) { std::cout << "  Capital if Assigned: $" << std::fixed << std::setprecision(2) << level4.assignment_capital << "\n"; }
+
+    double critical = level1.assignment_capital + level2.assignment_capital;
+    double total_all = critical + level3.assignment_capital + level4.assignment_capital;
+    std::cout << "\n" << std::string(80, '-') << "\nCAPITAL REQUIREMENTS:\n"
+              << "  Critical Risk (L1+L2): $" << std::fixed << std::setprecision(2) << critical
+              << " (" << (level1.count + level2.count) << " positions)\n"
+              << "  Total if All Assigned: $" << total_all
+              << " (" << (level1.count + level2.count + level3.count + level4.count) << " positions)\n";
+
+    if (current_prices.size() < underlyings.size()) {
+        std::set<std::string> unique_underlyings(underlyings.begin(), underlyings.end());
+        std::cout << "\n⚠️  Note: Could not fetch prices for "
+                  << (unique_underlyings.size() - current_prices.size()) << " underlyings\n";
+    }
+
+    std::cout << "\n";
+    return Result<void>{};
+}
+
+Result<void> AnalyzeCommand::analyze_impact(
+    const config::Config& config,
+    const std::string& underlying_filter,
+    const std::string& /* account_filter */,
+    const utils::OutputOptions& output_opts) {
+
+    Logger::info("Analyzing impact for underlying: {}", underlying_filter);
+
+    db::Database database(config.database.path);
+    auto init_result = database.initialize();
+    if (!init_result) {
+        return Error{"Failed to initialize database", init_result.error().message};
+    }
+
+    services::PositionService position_service(database);
+    auto positions_result = position_service.load_positions("", underlying_filter);
+    if (!positions_result) {
+        return Error{"Failed to load positions", positions_result.error().message};
+    }
+
+    auto positions = *positions_result;
+
+    if (positions.empty()) {
+        if (output_opts.json) {
+            std::cout << utils::JsonOutput::impact_analysis(underlying_filter, {}, {}) << "\n";
+        } else {
+            std::cout << "No positions found for " << underlying_filter << "\n";
+        }
+        return Result<void>{};
+    }
+
+    std::vector<RiskMetrics> impact_metrics;
+    for (const auto& pos : positions) {
+        Strategy temp;
+        temp.type = (pos.quantity < 0)
+            ? (pos.right == 'P' ? Strategy::Type::NakedShortPut : Strategy::Type::NakedShortCall)
+            : Strategy::Type::Unknown;
+        temp.legs.push_back(pos);
+        temp.underlying = pos.underlying;
+        temp.expiry = pos.expiry;
+        temp.currency = pos.currency;
+        impact_metrics.push_back(RiskCalculator::calculate_risk(temp));
+    }
+
+    if (output_opts.json) {
+        std::cout << utils::JsonOutput::impact_analysis(underlying_filter, positions, impact_metrics) << "\n";
+        return Result<void>{};
+    }
+    if (output_opts.quiet) return Result<void>{};
+
+    std::cout << "\nImpact Analysis: " << underlying_filter << "\n"
+              << std::string(80, '-') << "\n\nCurrent Positions:\n";
+    for (const auto& pos : positions) {
+        std::cout << "  " << pos.expiry << " $"
+                  << std::fixed << std::setprecision(2)
+                  << pos.strike << " " << pos.right << " × " << pos.quantity
+                  << " @ $" << pos.entry_premium << "\n";
+    }
+
+    double total_max_profit = 0.0, total_max_loss = 0.0;
+    double total_loss_current = 0.0, total_loss_5pct = 0.0;
+    std::cout << "\nRisk Summary:\n";
+    for (const auto& pos : positions) {
+        if (pos.right == 'P' && pos.quantity < 0) {
+            double premium = analysis::premium_for(pos.quantity, pos.entry_premium, pos.multiplier);
+            double breakeven = pos.strike - pos.entry_premium;
+            double max_loss = (pos.strike - pos.entry_premium) * pos.multiplier * std::abs(pos.quantity);
+
+            // Current loss: 10% scenario fallback (no live prices in impact path)
+            double loss_cur = std::max(0.0, pos.strike * 0.10 - pos.entry_premium) * pos.multiplier * std::abs(pos.quantity);
+            double loss_5pct = std::max(0.0, pos.strike * 0.05 - pos.entry_premium) * pos.multiplier * std::abs(pos.quantity);
+
+            std::cout << "  Short Put $" << std::fixed << std::setprecision(2)
+                      << pos.strike
+                      << ": Breakeven=$" << breakeven
+                      << ", Max Profit=$" << premium
+                      << ", Max Loss=$" << max_loss << "\n";
+            // Values are already USD (converted at import time)
+            total_max_profit += premium;
+            total_max_loss += max_loss;
+            total_loss_current += loss_cur;
+            total_loss_5pct += loss_5pct;
+        }
+    }
+
+    std::cout << "\nPortfolio Total (USD):\n"
+              << "  Max Profit: $" << std::fixed << std::setprecision(2) << total_max_profit << "\n"
+              << "  Max Loss: $" << total_max_loss << "\n"
+              << "  Current Loss: $" << total_loss_current << "\n"
+              << "  5% Loss: $" << total_loss_5pct << "\n\n";
+    return Result<void>{};
+}
+
+Result<void> AnalyzeCommand::analyze_portfolio(
+    const config::Config& config,
+    const std::string& account_filter,
+    const std::string& underlying_filter,
+    const utils::OutputOptions& output_opts) {
+
+    Logger::info("Analyzing portfolio review");
+
+    db::Database database(config.database.path);
+    auto init_result = database.initialize();
+    if (!init_result) {
+        return Error{"Failed to initialize database", init_result.error().message};
+    }
+
+    services::PositionService position_service(database);
+    auto positions_result = position_service.load_positions(account_filter, underlying_filter);
+    if (!positions_result) {
+        return Error{"Failed to load positions", positions_result.error().message};
+    }
+
+    auto positions = *positions_result;
+
+    if (positions.empty()) {
+        if (output_opts.json) {
+            std::cout << utils::JsonOutput::portfolio(services::PortfolioView{}) << "\n";
+        } else {
+            std::cout << "No open positions found.\n";
+        }
+        return Result<void>{};
+    }
+
+    // Fetch current prices
+    services::PriceService price_service(database);
+    std::vector<std::string> underlyings;
+    for (const auto& pos : positions) underlyings.push_back(pos.underlying);
+    auto current_prices = price_service.fetch_for_positions(underlyings);
+
+    // Load account names
+    auto account_names_result = position_service.load_account_names();
+    std::map<int64_t, std::string> account_names = account_names_result
+        ? *account_names_result : std::map<int64_t, std::string>{};
+
+    // Build portfolio view
+    services::PortfolioService portfolio_service;
+    auto view = portfolio_service.build_portfolio_view(positions, current_prices, account_names);
+
+    // JSON output
+    if (output_opts.json) {
+        std::cout << utils::JsonOutput::portfolio(view) << "\n";
+        return Result<void>{};
+    }
+    if (output_opts.quiet) return Result<void>{};
+
+    // --- Human-readable output ---
+
+    // Section 1: Assignment Risk Alerts
+    bool has_alerts = view.itm_count > 0 || view.near_money_count > 0 || view.expiring_soon_count > 0;
+    if (has_alerts) {
+        std::cout << "\n" << std::string(80, '=') << "\n";
+        std::cout << "ASSIGNMENT RISK ALERTS\n";
+        std::cout << std::string(80, '=') << "\n";
+
+        for (const auto& pp : view.positions) {
+            if (pp.risk_alert.empty()) continue;
+            std::cout << "  [" << pp.risk_alert << "] " << pp.account_name
+                      << " | " << pp.position.underlying
+                      << " $" << std::fixed << std::setprecision(2) << pp.position.strike
+                      << "P exp " << pp.position.expiry;
+            if (pp.has_price) {
+                std::cout << " (now: $" << pp.current_price << ")";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // Section 2: Positions Table
+    std::cout << "\n" << std::string(80, '=') << "\n";
+    std::cout << "POSITIONS\n";
+    std::cout << std::string(80, '=') << "\n";
+
+    std::cout << std::left
+              << std::setw(12) << "Account"
+              << std::setw(8) << "Symbol"
+              << std::setw(8) << "Strike"
+              << std::setw(12) << "Expiry"
+              << std::setw(5) << "DTE"
+              << std::setw(10) << "Entry"
+              << std::setw(10) << "P&L"
+              << std::setw(8) << "OTM%"
+              << std::setw(8) << "Yield%"
+              << "\n";
+    std::cout << std::string(80, '-') << "\n";
+
+    for (const auto& pp : view.positions) {
+        int dte = RiskCalculator::calculate_days_to_expiry(pp.position.expiry);
+        std::cout << std::left << std::fixed << std::setprecision(2)
+                  << std::setw(12) << pp.account_name
+                  << std::setw(8) << pp.position.underlying
+                  << std::setw(8) << pp.position.strike
+                  << std::setw(12) << pp.position.expiry
+                  << std::setw(5) << dte
+                  << std::setw(10) << pp.position.entry_premium
+                  << std::setw(10) << pp.pnl
+                  << std::setw(8) << pp.otm_percent
+                  << std::setw(8) << pp.annualized_yield;
+        if (!pp.risk_alert.empty()) std::cout << " [" << pp.risk_alert << "]";
+        std::cout << "\n";
+    }
+
+    // Section 3: Risk Aggregation
+    std::cout << "\n" << std::string(80, '=') << "\n";
+    std::cout << "RISK SUMMARY\n";
+    std::cout << std::string(80, '=') << "\n";
+    std::cout << "  Total Positions: " << view.total_positions << "\n";
+    std::cout << "  Premium Collected: $" << std::fixed << std::setprecision(2)
+              << view.total_premium_collected << "\n";
+    std::cout << "  Unrealized P&L: $" << view.total_unrealized_pnl << "\n";
+    std::cout << "  ITM: " << view.itm_count
+              << " | Near-money: " << view.near_money_count
+              << " | Expiring Soon: " << view.expiring_soon_count << "\n";
+
+    if (!view.loss_current.empty()) {
+        std::cout << "\n  Loss Scenarios (per account):\n";
+        for (const auto& [acct, loss_cur] : view.loss_current) {
+            double loss5 = view.loss_5pct.count(acct) ? view.loss_5pct.at(acct) : 0.0;
+            std::cout << "    [" << acct << "] Current loss: $" << loss_cur
+                      << " | 5% loss: $" << loss5 << "\n";
+        }
+    }
+
+    // Section 4: Expiration Calendar
+    std::cout << "\n" << std::string(80, '=') << "\n";
+    std::cout << "EXPIRATION CALENDAR\n";
+    std::cout << std::string(80, '=') << "\n";
+
+    std::vector<std::pair<std::string, std::string>> bucket_order = {
+        {"W1", "This Week"}, {"W2", "Next Week"},
+        {"W3", "Week 3"}, {"W4", "Week 4"},
+        {"W5+", "Week 5+"}
+    };
+    for (const auto& [key, label] : bucket_order) {
+        int count = view.dte_buckets.count(key) ? view.dte_buckets[key] : 0;
+        std::cout << "  " << label << ": " << count << " positions\n";
+    }
+
+    std::cout << "\n";
+    return Result<void>{};
+}
+
+} // namespace ibkr::commands

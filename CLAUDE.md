@@ -6,6 +6,64 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **ibkr-options-analyzer** is a modern C++20/23 command-line tool for tracking and analyzing non-expired open option positions from multiple Interactive Brokers accounts. The focus is on option selling strategies (especially short puts) with comprehensive risk analysis.
 
+## Behavioral Guidelines
+
+These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+### 1. Think Before Coding
+
+Don't assume. Don't hide confusion. Surface tradeoffs.
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them — don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+### 2. Simplicity First
+
+Minimum code that solves the problem. Nothing speculative.
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+### 3. Surgical Changes
+
+Touch only what you must. Clean up only your own mess.
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it — don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+
+Define success criteria. Loop until verified.
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
 ## Build System
 
 ### Prerequisites
@@ -44,44 +102,60 @@ cmake --build build/release
 - SQLiteCpp: SQLite wrapper
 - date: Howard Hinnant's date library
 
+## Currency Policy
+
+**USD is the base currency. All monetary values are converted to USD at the CLI layer.**
+
+- The C++ CLI uses `CurrencyConverter` (`src/core/utils/currency.hpp`) to convert all amounts to USD before outputting JSON
+- All JSON fields (premium, P&L, proceeds, strike, etc.) are already in USD — the `"currency": "USD"` field in JSON output confirms this
+- The Python dashboard must NOT do currency conversion — no `_FX` dicts, no `_to_usd()` helpers, no FX rate hardcoding
+- The dashboard should display numbers as-is from the CLI JSON or SQLite queries
+- If a value needs conversion and isn't already in USD, that's a C++ bug to fix, not a dashboard workaround
+
+### Why
+Multi-currency conversion in the UI leads to stale rates, double-conversion bugs, and inconsistent sums when aggregating across HKD/JPY/USD positions. The CLI has the full context (trade currency, conversion rates) and converts once at output time.
+
 ## Architecture
 
 ### Layer Structure (WAT Framework Inspired)
-1. **Commands** (`src/commands/`): CLI command handlers (thin layer)
-2. **Core Logic** (`src/flex/`, `src/parser/`, `src/analyzer/`): Business logic
-3. **Data Layer** (`src/db/`): SQLite database operations
-4. **Utilities** (`src/utils/`): Cross-cutting concerns (logging, HTTP, errors)
+1. **Commands** (`src/cli/commands/`): Thin CLI wrappers delegating to services
+2. **Services** (`src/core/services/`): Business logic, transport-agnostic (callable from CLI or API)
+3. **Core Logic** (`src/core/analysis/`, `src/core/parsers/`, `src/core/flex/`): Domain logic
+4. **Data Layer** (`src/core/db/`): SQLite database operations
+5. **Utilities** (`src/core/utils/`): Cross-cutting concerns (logging, HTTP, JSON output, errors)
 
 ### Key Design Patterns
-- **Result<T, E>** type for error handling (no exceptions in hot paths)
+- **Result<T, E>** type for recoverable errors; exceptions reserved for unrecoverable bugs (invariant violations, logic errors)
 - **RAII** for resource management (no raw new/delete)
 - **Dependency injection** via constructors
 - **Separation of concerns**: parsing, business logic, and presentation are separate
 
 ### Module Responsibilities
-- `config/`: Load and validate config.json
-- `flex/`: IBKR Flex Web Service client (SendRequest → Poll → GetStatement)
-- `parser/`: Parse IBKR option symbols and CSV reports
-- `db/`: SQLite schema and CRUD operations
-- `analyzer/`: Strategy detection and risk calculations
-- `commands/`: CLI command implementations
-- `utils/`: Logger, HTTP client, Result type
+- `src/core/config/`: Load and validate config.json
+- `src/core/flex/`: IBKR Flex Web Service client (SendRequest → Poll → GetStatement)
+- `src/core/parsers/`: Parse IBKR option symbols and CSV reports
+- `src/core/db/`: SQLite schema and CRUD operations
+- `src/core/analysis/`: Strategy detection and risk calculations
+- `src/core/services/`: Business logic orchestration (FlexService, ImportService, PositionService, PriceService, StrategyService, PortfolioService, ScreenerService, ReportService)
+- `src/core/report/`: Report generation and CSV export
+- `src/core/utils/`: Logger, HTTP client, JSON output, Result type
+- `src/cli/commands/`: CLI command handlers (thin wrappers)
 
 ## Development Workflow
 
 ### Adding a New Command
-1. Create header/cpp in `src/commands/`
-2. Add command to `main.cpp` CLI11 setup
-3. Implement command logic (delegate to core modules)
+1. Create header/cpp in `src/cli/commands/`
+2. Add command to `src/cli/main.cpp` CLI11 setup
+3. Delegate to existing service in `src/core/services/` (or create new service if needed)
 4. Update CMakeLists.txt with new files
 
 ### Adding a New Strategy Detector
-1. Add strategy type enum in `src/analyzer/strategy_detector.hpp`
+1. Add strategy type enum in `src/core/analysis/strategy_detector.hpp`
 2. Implement detection rules in `strategy_detector.cpp`
-3. Add risk calculation logic in `risk_calculator.cpp`
+3. Add risk calculation logic in `src/core/analysis/risk_calculator.cpp`
 
 ### Database Schema Changes
-1. Update `src/db/schema.hpp` with new CREATE TABLE statements
+1. Update `src/core/db/schema.hpp` with new CREATE TABLE statements
 2. Increment schema version in metadata table
 3. Add migration logic in `database.cpp` (future)
 
@@ -129,10 +203,10 @@ cmake --build build/debug --target test
 - Headers include guards: `#pragma once`
 
 ### Error Handling
-- Use `Result<T, E>` for all fallible operations
+- Use `Result<T, E>` for all recoverable errors (forces callers to handle explicitly)
+- Exceptions only for truly unrecoverable situations (invariant violations, programmer bugs)
 - Provide context in error messages (account name, file path, etc.)
 - Log errors before returning them
-- No exceptions in hot paths (only for unrecoverable errors)
 
 ### Comments
 - Document public APIs with Doxygen-style comments
@@ -161,23 +235,36 @@ cmake --build build/debug --target test
 ## Security
 
 ### Sensitive Data
-- NEVER commit `config.json` (contains Flex tokens)
-- Set file permissions: `chmod 600 ~/.ibkr-options-analyzer/config.json`
+- NEVER commit `config.json` (may contain Flex tokens in legacy format)
+- Credentials provided via CLI args (not stored in config file)
 - Tokens are tied to IP address (may need regeneration)
 
 ### SQL Injection Prevention
 - Always use parameterized queries via SQLiteCpp
 - Never concatenate user input into SQL strings
 
+## Implemented Features
+
+### Dashboard (Phase 5)
+- Web dashboard with Dash/Plotly frontend at `dashboard/`
+- Account management UI with DB storage
+- Portfolio and Screener tabs for position analysis
+- Run: `cd dashboard && uvicorn app.main:app --reload --port 8001`
+
+### Analysis Services (Phase 5-6)
+- Option chain fetching via Yahoo Finance v7/v8 API
+- Synthetic option chain generation using Black-Scholes (when Yahoo blocked)
+- ScreenerService: watchlist-based opportunity screening
+- PortfolioService: consolidated portfolio view construction
+- Multi-currency support with automatic symbol-to-currency deduction
+
 ## Future Enhancements
 
-### Phase 7+ (Not Yet Implemented)
-- Black-Scholes Greeks calculation
+### Not Yet Implemented
+- Black-Scholes Greeks calculation (delta, gamma, theta, vega)
 - TWS API integration for live prices
-- Web dashboard (HTTP server + React frontend)
 - Email/Slack alerts for risk thresholds
 - Backtesting framework
-- Multi-currency support
 - Tax reporting (wash sales, P&L)
 
 ## Resources

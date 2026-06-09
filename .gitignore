@@ -52,6 +52,9 @@ logs/
 *.csv
 flex_reports/
 
+# Scripts with potential credentials
+update.sh
+
 # Temporary files
 *.tmp
 *.temp
@@ -81,6 +84,26 @@ $RECYCLE.BIN/
 *.backup
 *~
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+dashboard/.venv/
+
+# Google Sheets API credentials
+google/
+credentials.json
+token.json
+
+# Generated reports
+reports/
+
 # Core dumps
-core
-core.*
+/core
+/core.*
+
+# Superpowers brainstorming sessions
+.superpowers/
+reports/
